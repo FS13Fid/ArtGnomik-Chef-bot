@@ -2,36 +2,39 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
-import urllib.parse
-from typing import Dict
+from typing import Dict, Optional
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiohttp import web
+from google import genai
+from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 # -------------------------------------------------------------------
-# НАСТРОЙКИ И КЛЮЧИ (Получаем из Environment Variables Render)
+# НАСТРОЙКИ И КЛЮЧИ (Из Environment Variables на Render)
 # -------------------------------------------------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Клиент для генерации текста через бесплатную Groq API
+# Клиент Groq для генерации текста и рецептов
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
-
 GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# Клиент Google GenAI (Imagen 3 / Gemini)
+google_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # FSM Состояния
@@ -43,21 +46,39 @@ class UserPreferences(StatesGroup):
 
 def main_keyboard():
     kb = [
-        [InlineKeyboardButton(text="Новая подборка ✨", callback_data="new_selection")],
+        [InlineKeyboardButton(text="Новая подборка ✨ (Groq + Google AI)", callback_data="new_selection")],
         [InlineKeyboardButton(text="Настроить фильтрацию ⚙️", callback_data="settings")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Бесплатная генерация ссылки на фото блюда через актуальный API Pollinations.ai
-def generate_pollinations_image_url(dish_name_en: str) -> str:
-    clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en)
-    prompt = f"delicious food photo of {clean_name}, appetizing, high detailed, studio lighting, 8k"
-    encoded_prompt = urllib.parse.quote(prompt)
-    seed = random.randint(1, 999999)
+# Генерация изображения блюда через Google AI (Imagen 3)
+async def generate_google_image_bytes(dish_name_en: str) -> Optional[bytes]:
+    clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en).strip()
+    prompt = (
+        f"A professional photo of a delicious food dish: {clean_name}. "
+        f"Cozy aesthetic home dinner setting, warm lighting, top view, appetizing food photography, highly detailed."
+    )
     
-    # Используем обновленный рабочий URL с моделью flux
-    return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=800&height=600&seed={seed}&model=flux&nologo=true"
+    try:
+        # Вызов генерации изображения Imagen 3 через SDK Google GenAI
+        result = await asyncio.to_thread(
+            google_client.models.generate_images,
+            model='imagen-3.0-generate-002',
+            prompt=prompt,
+            config=genai_types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="4:3",
+                output_mime_type="image/jpeg",
+            )
+        )
+        
+        if result.generated_images:
+            return result.generated_images[0].image.image_bytes
+    except Exception as e:
+        logging.error(f"Google Imagen API Error: {e}")
+        
+    return None
 
 
 # Быстрая генерация меню через Groq
@@ -73,7 +94,8 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
       "dishes": [
         {{
           "title": "Уникальное название блюда на русском с эмодзи",
-          "title_en": "Very short description in English for image generation (e.g., 'grilled salmon with rice')",
+          "title_en": "Very short clear English search term/description for image generation (e.g., 'creamy salmon pasta', 'baked potato with cheese', 'spaghetti bolognese')",
+          "cooking_time": "30 мин",
           "recipe": "Краткое пошаговое описание приготовления",
           "ingredients": [
             {{"name": "Название продукта", "amount": 150, "unit": "г"}}
@@ -103,21 +125,23 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
             "dishes": [{
                 "title": "Быстрые спагетти с сыром 🧀",
                 "title_en": "spaghetti with cheese",
+                "cooking_time": "15 мин",
                 "recipe": "Отварите пасту до состояния al dente и посыпьте тертым сыром.",
                 "ingredients": [{"name": "Спагетти", "amount": 100, "unit": "г"}, {"name": "Сыр", "amount": 50, "unit": "г"}]
             }]
         }
 
 
-# Хэндлеры бота
+# -------------------------------------------------------------------
+# ХЭНДЛЕРЫ BOT AIOgram
+# -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=1, dinners=3, vegetarian=False)
 
     welcome_text = (
         "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я составляю меню с помощью **Groq AI** и создаю яркие аппетитные фото с **Pollinations.ai**!\n"
-        "Всё работает бесплатно и без ограничений!"
+        "Я составляю меню с помощью **Groq AI** и генерирую красивые фотографии блюд через **Google AI (Imagen 3)**!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -180,7 +204,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 3)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("⚡ Составляю рецепты и генерирую фото через Pollinations...")
+    await call.message.answer("🤖 Составляю меню и генерирую сочные фото через Google AI...")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -188,14 +212,22 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(current_dishes=dishes)
 
     for idx, dish in enumerate(dishes, 1):
-        # Генерируем ссылку Pollinations
-        image_url = generate_pollinations_image_url(dish.get("title_en", "delicious food"))
-        caption = f"**День {idx}: {dish['title']}**\n\n📖 **Рецепт:**\n{dish['recipe']}"
+        dish_en = dish.get("title_en", "delicious meal")
+        cooking_time = dish.get("cooking_time", "30 мин")
         
-        try:
-            await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Error sending photo: {e}")
+        # Генерация изображения через Google Imagen 3
+        img_bytes = await generate_google_image_bytes(dish_en)
+        
+        caption = (
+            f"**День {idx}: {dish['title']}**\n"
+            f"⏱ Время приготовления: {cooking_time} | 👤 На {persons} перс.\n\n"
+            f"📖 **Рецепт:**\n{dish['recipe']}"
+        )
+        
+        if img_bytes:
+            photo_file = BufferedInputFile(img_bytes, filename=f"dish_{idx}.jpg")
+            await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown")
+        else:
             await call.message.answer(caption, parse_mode="Markdown")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -257,8 +289,9 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer(info_text, reply_markup=main_keyboard())
 
 
+# Web server для поддержки вебхуков / пингов Render
 async def handle_ping(request):
-    return web.Response(text="Art Gnomik is running with Pollinations!")
+    return web.Response(text="Art Gnomik is running with Google AI!")
 
 
 async def start_web_server():
