@@ -62,9 +62,19 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 # -------------------------------------------------------------------
 try:
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+    
+    # Пытаемся взять JSON из переменной окружения Render
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        # Запасной вариант для локального запуска (если файл есть рядом)
+        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+        
     client = gspread.authorize(creds)
-    sheet = client.open("Бот-Промокоды") 
+    sheet = client.open("Бот-Промокоды")  
     users_ws = sheet.worksheet("users")
     promos_ws = sheet.worksheet("promocodes")
     logging.info("✅ Успешное подключение к Google Таблице!")
@@ -772,148 +782,3 @@ async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
-
-    buttons = []
-    for opt_idx, opt in enumerate(options):
-        buttons.append([InlineKeyboardButton(
-            text=f"✨ {opt['title']} ({opt.get('cooking_time', '20 мин')})",
-            callback_data=f"apply_dish_swap_{opt_idx}"
-        )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_replace")])
-
-    await call.message.answer(
-        f"Выберите новое блюдо взамен **«{old_dish['title']}»**:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
-
-
-@dp.callback_query(F.data.startswith("apply_dish_swap_"))
-async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
-    await call.answer("Применяю замену...")
-    opt_idx = int(call.data.split("_")[-1])
-    data = await state.get_data()
-
-    dish_idx = data.get("target_dish_idx")
-    dishes = data.get("current_dishes", [])
-    options = data.get("temp_replacement_options", [])
-    persons = data.get("persons", 1)
-
-    if dish_idx is None or not dishes or dish_idx >= len(dishes) or opt_idx >= len(options):
-        await call.message.answer("⚠️ Ошибка замены. Пожалуйста, начните заново.", reply_markup=main_keyboard())
-        return
-
-    chosen_dish = options[opt_idx]
-    dishes[dish_idx] = chosen_dish
-    
-    total_rub = sum(
-        sum(i.get("estimated_price_rub", 0) for i in d.get("ingredients", []) if not i.get("is_pantry", False))
-        for d in dishes
-    )
-    await state.update_data(current_dishes=dishes, estimated_total_rub=total_rub)
-
-    await call.message.edit_text(f"🎨 Генерирую фото для **«{chosen_dish['title']}»** через YandexART...", parse_mode="Markdown")
-
-    img_bytes = await generate_yandex_art_bytes(chosen_dish['title'])
-    caption = f"🎉 **Блюдо заменено!**\n\n" + format_dish_text(chosen_dish, dish_idx, persons)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Заменить продукт 🔄", callback_data=f"replace_ing_select_{dish_idx}"),
-            InlineKeyboardButton(text="Заменить блюдо 🍝", callback_data=f"replace_dish_options_{dish_idx}")
-        ],
-        [InlineKeyboardButton(text="Список покупок 🛒", callback_data="get_shopping_list")]
-    ])
-
-    if img_bytes:
-        photo_file = BufferedInputFile(img_bytes, filename=f"dish_{dish_idx+1}.png")
-        await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown", reply_markup=kb)
-        await call.message.delete()
-    else:
-        await call.message.edit_text(caption, parse_mode="Markdown", reply_markup=kb)
-
-
-# -------------------------------------------------------------------
-# СПИСОК ПОКУПОК
-# -------------------------------------------------------------------
-@dp.callback_query(F.data == "get_shopping_list")
-async def shopping_list(call: types.CallbackQuery, state: FSMContext):
-    await call.answer()
-    data = await state.get_data()
-    persons = data.get("persons", 1)
-    dishes = data.get("current_dishes", [])
-    estimated_total = data.get("estimated_total_rub", 0)
-
-    if not dishes:
-        await call.message.answer("⚠️ Сначала сгенерируйте подборку через меню!", reply_markup=main_keyboard())
-        return
-
-    dinners_count = len(dishes)
-
-    shop_categories = {
-        "protein": {"title": "🥩 Белок:", "items": {}},
-        "garnish": {"title": "🍚 Гарнир:", "items": {}},
-        "greens": {"title": "🌿 Зелень:", "items": {}},
-        "dairy": {"title": "🥛 Молочка:", "items": {}},
-        "vegetables": {"title": "🥦 Овощи:", "items": {}},
-        "nuts": {"title": "🌰 Орехи:", "items": {}},
-        "bakery": {"title": "🥖 Хлеб:", "items": {}},
-        "other": {"title": "📦 Прочее:", "items": {}}
-    }
-
-    pantry_categories = {
-        "oil": {"title": "🧈 Масло:", "items": {}},
-        "bakery": {"title": "🌾 Мука:", "items": {}},
-        "spices": {"title": "🧂 Приправа:", "items": {}},
-        "other": {"title": "📦 Прочее:", "items": {}}
-    }
-
-    for dish in dishes:
-        for ing in dish.get("ingredients", []):
-            name = ing["name"].capitalize()
-            amount = ing.get("amount", 0)
-            unit = ing.get("unit", "")
-            cat = ing.get("category", "other")
-            is_pantry = ing.get("is_pantry", False)
-
-            if is_pantry:
-                target_cat = pantry_categories.get(cat, pantry_categories["other"])
-            else:
-                target_cat = shop_categories.get(cat, shop_categories["other"])
-            
-            target_cat["items"][name] = target_cat["items"].get(name, 0) + amount
-
-    shop_text = f"🛒 **Список покупок на {dinners_count} ужинов**\n"
-    shop_text += f"👤 Расчет на {persons} чел. | 💰 Итог: ~{estimated_total} руб.\n\n"
-    
-    shop_text += "🔴 **Купить в магазине:**\n"
-    for cat_data in shop_categories.values():
-        if cat_data["items"]:
-            shop_text += f"{cat_data['title']}\n"
-            for name, amount in cat_data["items"].items():
-                shop_text += f"  - [ ] {name}: {amount}\n"
-            shop_text += "\n"
-            
-    shop_text += "🟢 **Проверьте дома (базовые):**\n"
-    for cat_data in pantry_categories.values():
-        if cat_data["items"]:
-            shop_text += f"{cat_data['title']}\n"
-            for name, amount in cat_data["items"].items():
-                shop_text += f"  - [ ] {name}: {amount}\n"
-            shop_text += "\n"
-
-    await call.message.answer(shop_text, parse_mode="Markdown")
-
-
-# -------------------------------------------------------------------
-# ЗАПУСК БОТА
-# -------------------------------------------------------------------
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен")
