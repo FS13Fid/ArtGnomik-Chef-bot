@@ -38,14 +38,19 @@ SPOONACULAR_API_KEY = os.environ.get(
     "1d01fb14d9ad4aa383a5b95c116b131c"
 ).strip()
 
-# GOOGLE GEMINI (Бесплатный резерв через OpenAI-совместимый API)
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AQ.Ab8RN6I_xi52oshIN0N7K_HDgDSxzjzx7siEswwzfEfWpsFU9Q").strip()
-google_client = AsyncOpenAI(
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-    api_key=GOOGLE_API_KEY
-) if GOOGLE_API_KEY else None
+# ОСНОВНАЯ И РЕЗЕРВНАЯ МОДЕЛИ (Groq)
+groq_client = AsyncOpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY
+)
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
-GOOGLE_MODEL = "gemini-2.5-flash"
+# РЕЗЕРВНЫЙ КЛИЕНТ (вторая бесплатная модель Groq для подстраховки при лимитах)
+reserve_client = AsyncOpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY
+)
+RESERVE_MODEL = "llama-3.1-8b-instant"
 
 # НАСТРОЙКИ ЮKASSA
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "YOUR_SHOP_ID").strip()
@@ -61,12 +66,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 USERS_DB: Dict[int, dict] = {}
-
-groq_client = AsyncOpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=GROQ_API_KEY
-)
-GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 class UserPreferences(StatesGroup):
@@ -127,7 +126,7 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                         r = results[0]
                         title = r.get("title", dish_name)
                         ready_in_minutes = r.get("readyInMinutes", 30)
-                        image_url = r.get("image", "")  # Реальная ссылка на картинку от Spoonacular
+                        image_url = r.get("image", "")
                         
                         instructions_list = []
                         analyzed_instructions = r.get("analyzedInstructions", [])
@@ -282,7 +281,7 @@ async def sub_active_alert(call: types.CallbackQuery):
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ МЕНЮ С АВТО-ПЕРЕКЛЮЧЕНИЕМ (Groq -> Google Gemini)
+# ГЕНЕРАЦИЯ МЕНЮ С АВТО-ПЕРЕКЛЮЧЕНИЕМ (Groq 70b -> Groq 8b)
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool,
                              budget: int) -> dict:
@@ -307,18 +306,17 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
         )
         dish_names = json.loads(res_list.choices[0].message.content).get("dish_names", [])
     except Exception as e:
-        logging.warning(f"Groq недоступен для списка ({e}), переключаемся на Gemini...")
-        if google_client:
-            try:
-                response = await google_client.chat.completions.create(
-                    model=GOOGLE_MODEL,
-                    response_format={"type": "json_object"},
-                    messages=[{"role": "user", "content": prompt_list}],
-                    temperature=0.7
-                )
-                dish_names = json.loads(response.choices[0].message.content).get("dish_names", [])
-            except Exception as ex:
-                logging.error(f"Gemini тоже выдал ошибку: {ex}")
+        logging.warning(f"Основная модель Groq недоступна ({e}), переключаемся на резервную Llama-3.1-8b...")
+        try:
+            response = await reserve_client.chat.completions.create(
+                model=RESERVE_MODEL,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt_list}],
+                temperature=0.7
+            )
+            dish_names = json.loads(response.choices[0].message.content).get("dish_names", [])
+        except Exception as ex:
+            logging.error(f"Резервная модель Groq тоже выдала ошибку: {ex}")
 
     if not dish_names:
         dish_names = ["Паста с курицей и грибами", "Овощное рагу", "Запеченная рыба с гарниром", "Куриный суп"][:dinners]
@@ -363,19 +361,16 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
                 )
                 dish_data = json.loads(resp.choices[0].message.content)
             except Exception:
-                if google_client:
-                    try:
-                        response = await google_client.chat.completions.create(
-                            model=GOOGLE_MODEL,
-                            response_format={"type": "json_object"},
-                            messages=[{"role": "user", "content": prompt_dish}],
-                            temperature=0.3
-                        )
-                        dish_data = json.loads(response.choices[0].message.content)
-                    except Exception as e:
-                        logging.error(f"Ошибка резервной генерации для {name}: {e}")
-                        continue
-                else:
+                try:
+                    response = await reserve_client.chat.completions.create(
+                        model=RESERVE_MODEL,
+                        response_format={"type": "json_object"},
+                        messages=[{"role": "user", "content": prompt_dish}],
+                        temperature=0.3
+                    )
+                    dish_data = json.loads(response.choices[0].message.content)
+                except Exception as e:
+                    logging.error(f"Ошибка резервной генерации для {name}: {e}")
                     continue
 
         dishes.append(dish_data)
@@ -398,17 +393,16 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
         )
         return json.loads(response.choices[0].message.content)
     except Exception:
-        if google_client:
-            try:
-                response = await google_client.chat.completions.create(
-                    model=GOOGLE_MODEL,
-                    response_format={"type": "json_object"},
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
-                )
-                return json.loads(response.choices[0].message.content)
-            except Exception:
-                pass
+        try:
+            response = await reserve_client.chat.completions.create(
+                model=RESERVE_MODEL,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            pass
         return dish
 
 
@@ -423,17 +417,16 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
         )
         return json.loads(response.choices[0].message.content).get("options", [])
     except Exception:
-        if google_client:
-            try:
-                response = await google_client.chat.completions.create(
-                    model=GOOGLE_MODEL,
-                    response_format={"type": "json_object"},
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.5
-                )
-                return json.loads(response.choices[0].message.content).get("options", [])
-            except Exception:
-                pass
+        try:
+            response = await reserve_client.chat.completions.create(
+                model=RESERVE_MODEL,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5
+            )
+            return json.loads(response.choices[0].message.content).get("options", [])
+        except Exception:
+            pass
         return []
 
 
