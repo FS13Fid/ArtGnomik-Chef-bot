@@ -5,3 +5,4 @@ httpx>=0.27.0
 google-genai
 gspread
 oauth2client
+yookassa==3.4.0
