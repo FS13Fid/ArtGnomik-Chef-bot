@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import urllib.parse
 import uuid
 from typing import Dict
 
@@ -14,7 +15,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiohttp import web
 from openai import AsyncOpenAI
-import segmind
 
 # Импортируем официальный SDK ЮKassa
 from yookassa import Configuration, Payment
@@ -24,11 +24,6 @@ from yookassa import Configuration, Payment
 # -------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-SEGMIND_API_KEY = os.environ.get("SEGMIND_API_KEY", "").strip()
-
-# Устанавливаем ключ для Segmind (Kandinsky)
-if SEGMIND_API_KEY:
-    segmind.api_key = SEGMIND_API_KEY
 
 # ОСНОВНАЯ И РЕЗЕРВНАЯ МОДЕЛИ (Groq)
 groq_client = AsyncOpenAI(
@@ -92,34 +87,22 @@ def check_access(user_id: int) -> bool:
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ КАРТИНОК ЧЕРЕЗ KANDINSKY (SEGMIND)
+# ГЕНЕРАЦИЯ КАРТИНОК ЧЕРЕЗ POLLINATIONS.AI (БЕЗ КЛЮЧЕЙ И ОШИБОК)
 # -------------------------------------------------------------------
 async def fetch_dish_image(dish_name: str) -> str:
-    """Генерирует уникальную картинку блюда через модель Kandinsky 2.2."""
+    """Генерирует уникальную картинку блюда через бесплатный API Pollinations.ai без ключей."""
     try:
         prompt_text = f"Professional food photography of {dish_name}, restaurant quality, appetizing, highly detailed, 4k"
+        encoded_prompt = urllib.parse.quote(prompt_text)
         
-        # Запускаем генерацию в отдельном потоке, так как segmind синхронный
-        result = await asyncio.to_thread(
-            segmind.run,
-            "kandinsky2.2-txt2img",
-            prompt=prompt_text,
-            negative_prompt="lowres, text, error, cropped, worst quality, low quality, blurry",
-            samples=1,
-            num_inference_steps=25,
-            img_width=512,
-            img_height=512,
-            base64=False
-        )
-        
-        if result and "output" in result:
-            output_url = result["output"][0] if isinstance(result["output"], list) else result["output"]
-            return output_url
+        # Pollinations отдает прямую картинку по URL
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true"
+        return image_url
             
     except Exception as e:
-        logging.error(f"Ошибка генерации картинки через Kandinsky: {e}")
+        logging.error(f"Ошибка генерации картинки через Pollinations: {e}")
 
-    # Надежная резервная база на случай ошибки API
+    # Надежная резервная база на случай сбоя сети
     name_lower = dish_name.lower()
     if "суп" in name_lower or "борщ" in name_lower or "бульон" in name_lower or "щи" in name_lower:
         return "https://images.unsplash.com/photo-1547592166-23ac45744acd?w=800&auto=format&fit=crop&q=80"
@@ -520,7 +503,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
-    await call.answer("Генерирую персональное меню и рисую уникальные фото через Kandinsky...")
+    await call.answer("Генерирую персональное меню и картинки...")
     data = await state.get_data()
 
     ai_data = await generate_groq_menu(
@@ -547,7 +530,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
         summary_text += f"**{idx + 1}.** {title}\n"
         caption = format_dish_text(dish, idx, data.get("persons", 1))
 
-        # Генерируем картинку через Kandinsky
+        # Генерируем картинку через Pollinations
         image_url = await fetch_dish_image(title)
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
