@@ -24,7 +24,6 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_aUSwGXmUTEZur9nFHniiWGdyb3FYK
 
 YANDEX_CLOUD_FOLDER = os.environ.get("YANDEX_CLOUD_FOLDER", "b1gqkn7qf0sab32u6ghg").strip()
 YANDEX_CLOUD_API_KEY = os.environ.get("YANDEX_CLOUD_API_KEY", "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ").strip()
-YANDEX_CLOUD_MODEL = "aliceai-image-art-3.0/latest"
 
 if not BOT_TOKEN:
     logging.warning("BOT_TOKEN не задан!")
@@ -38,15 +37,6 @@ groq_client = AsyncOpenAI(
     api_key=GROQ_API_KEY
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
-
-# Клиент YandexART через OpenAI SDK
-yandex_art_client = None
-if YANDEX_CLOUD_API_KEY and YANDEX_CLOUD_FOLDER:
-    yandex_art_client = AsyncOpenAI(
-        api_key=YANDEX_CLOUD_API_KEY,
-        base_url="https://ai.api.cloud.yandex.net/v1",
-        project=YANDEX_CLOUD_FOLDER
-    )
 
 
 class UserPreferences(StatesGroup):
@@ -64,11 +54,11 @@ def main_keyboard():
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ЧЕРЕЗ YANDEX ART (OPENAI COMPATIBLE API)
+# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ЧЕРЕЗ YANDEX CLOUD API
 # -------------------------------------------------------------------
 async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
-    if not yandex_art_client:
-        logging.error("❌ YANDEX_CLOUD_API_KEY или YANDEX_CLOUD_FOLDER не установлены!")
+    if not YANDEX_CLOUD_API_KEY or not YANDEX_CLOUD_FOLDER:
+        logging.error("❌ YANDEX_CLOUD_API_KEY или YANDEX_CLOUD_FOLDER не заданы!")
         return None
 
     clean_name = re.sub(r'[^а-яА-Яa-zA-Z0-9\s]', '', dish_name_ru).strip()
@@ -77,75 +67,127 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
         f"Уютная домашняя сервировка, теплое мягкое освещение, вид сверху, высокая детализация, 8k."
     )
 
+    url = "https://ai.api.cloud.yandex.net/v1/images/generations"
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_CLOUD_API_KEY}",
+        "x-folder-id": YANDEX_CLOUD_FOLDER,
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": f"art://{YANDEX_CLOUD_FOLDER}/yandexart/latest",
+        "prompt": prompt,
+        "size": "1024x1024"
+    }
+
     try:
-        logging.info(f"🎨 Запрос к YandexART для блюда: {clean_name}")
-        
-        response = await yandex_art_client.images.generate(
-            model=f"art://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
-            prompt=prompt,
-            size="1024x1024"
-        )
+        logging.info(f"🎨 Запрос к Yandex Cloud API для блюда: '{clean_name}'...")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=60) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"❌ Yandex Cloud API вернул ошибку HTTP {response.status}: {error_text}")
+                    return None
 
-        b64_data = response.data[0].b64_json
-        if b64_data:
-            logging.info(f"✅ Картинка для '{clean_name}' успешно сгенерирована!")
-            return base64.b64decode(b64_data)
-        else:
-            logging.error("❌ Поле b64_json оказалось пустым в ответе YandexART")
+                data = await response.json()
+                b64_data = None
+                
+                if "data" in data and len(data["data"]) > 0:
+                    b64_data = data["data"][0].get("b64_json")
 
+                if b64_data:
+                    logging.info(f"✅ Картинка для '{clean_name}' успешно сгенерирована!")
+                    return base64.b64decode(b64_data)
+                else:
+                    logging.error(f"❌ Ответ Yandex Cloud не содержит b64_json: {data}")
+
+    except asyncio.TimeoutError:
+        logging.error("⏳ Таймаут ожидания ответа Yandex Cloud API (60s)")
     except Exception as e:
-        logging.error(f"❌ Ошибка генерации YandexART: {e}", exc_info=True)
+        logging.error(f"❌ Ошибка Yandex Cloud API: {e}", exc_info=True)
 
     return None
 
 
 # -------------------------------------------------------------------
-# ЗАПРОС К GROQ
+# ЗАПРОСЫ К GROQ (ПОДРОБНЫЕ РЕЦЕПТЫ + ZERO WASTE)
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> dict:
-    veg_status = "Только вегетарианские блюда!" if vegetarian else "Любые блюда (мясо, птица, рыба)."
+    veg_status = "Только вегетарианские блюда!" if vegetarian else "Любые блюда (мясо, птица, рыба, морепродукты)."
 
     prompt = f"""
-    Ты шеф-повар. Сгенерируй меню из {dinners} уникальных ужинов для {persons} человек.
+    Ты шеф-повар и эксперт по минимизации пищевых отходов (Food Waste Optimizer). 
+    Сгенерируй меню из {dinners} уникальных ужинов для {persons} человек.
     Предпочтения: {veg_status}
+
+    ГЛАВНЫЕ ПРАВИЛА:
+    1. Ингредиенты оптимизированы без остатков (скоропортящиеся продукты, такие как зелень, творожный сыр, лаваш, сливки, томаты, задействуются в 2-3 блюдах).
+    2. Каждый рецепт ДОЛЖЕН БЫТЬ ПОДРОБНЫМ и структурированным по шагам! Включай список оборудования и варианты подачи.
 
     Верни ответ строго в формате JSON:
     {{
       "estimated_total_rub": 1850,
       "dishes": [
         {{
-          "title": "Уникальное название блюда на русском",
-          "cooking_time": "25 мин",
-          "recipe": "Краткое пошаговое описание приготовления",
+          "title": "Сливочный ролл с сёмгой",
+          "cooking_time": "10 мин",
+          "equipment": "Плита/Доска",
+          "serving": "Кунжут, Соевый соус",
+          "instructions": [
+            "1. Разверните лист лаваша на столе.",
+            "2. Равномерно смажьте поверхность тонким слоем творожного сыра.",
+            "3. Разложите листья салата фриллис.",
+            "4. Тонко нарежьте сёмгу и равномерно распределите по всей поверхности.",
+            "5. По желанию посыпьте кунжутом.",
+            "6. Сверните лаваш в плотный рулет.",
+            "7. По желанию уберите в холодильник на 30 минут, чтобы рулет уплотнился.",
+            "8. Нарежьте на кусочки и подавайте."
+          ],
           "ingredients": [
             {{
-              "name": "Название продукта",
-              "amount": 150,
+              "name": "Семга слабосоленая",
+              "amount": {100 * persons},
               "unit": "г",
-              "category": "protein", 
+              "category": "protein",
               "is_pantry": false,
-              "estimated_price_rub": 180
+              "estimated_price_rub": 350
+            }},
+            {{
+              "name": "Творожный сыр",
+              "amount": {60 * persons},
+              "unit": "г",
+              "category": "dairy",
+              "is_pantry": false,
+              "estimated_price_rub": 120
+            }},
+            {{
+              "name": "Армянский лаваш",
+              "amount": {0.5 * persons},
+              "unit": "лист",
+              "category": "bakery",
+              "is_pantry": false,
+              "estimated_price_rub": 50
+            }},
+            {{
+              "name": "Салат фриллис",
+              "amount": 1,
+              "unit": "пучок",
+              "category": "vegetables",
+              "is_pantry": false,
+              "estimated_price_rub": 80
+            }},
+            {{
+              "name": "Кунжут",
+              "amount": 1,
+              "unit": "ч.л.",
+              "category": "other",
+              "is_pantry": true,
+              "estimated_price_rub": 0
             }}
           ]
         }}
       ]
     }}
-
-    Правила оценки стоимости:
-    - estimated_price_rub: примерная стоимость указанного количества продукта в российских рублях.
-    - estimated_total_rub: примерная итоговая сумма всей корзины покупок (без учета базовых продуктов из "is_pantry").
-
-    Категории ингредиентов ("category"):
-    - "protein": Белок (мясо, рыба, птица, фарш)
-    - "garnish": Гарнир/крупы (макароны, рис, картофель)
-    - "vegetables": Овощи и зелень (грибы, томаты, лук, зелень)
-    - "dairy": Молочные продукты и сыры (сливки, сыр, творог)
-    - "bakery": Хлеб/лаваш
-    - "other": Прочее
-
-    Значение "is_pantry":
-    - true: если это базовая приправа/масло/мука/соль, которая обычно есть дома.
-    - false: если это покупной продукт для рецепта.
     """
 
     try:
@@ -153,7 +195,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a culinary assistant that output JSON only."},
+                {"role": "system", "content": "You are a professional chef outputting detailed recipes in strict JSON format."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7
@@ -165,17 +207,157 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
             "estimated_total_rub": 1200,
             "dishes": [
                 {
-                    "title": "Спагетти Болоньезе",
-                    "cooking_time": "25 мин",
-                    "recipe": "Обжарьте фарш с томатами и подавайте со спагетти.",
+                    "title": "Сливочный ролл с сёмгой",
+                    "cooking_time": "10 мин",
+                    "equipment": "Разделочная доска, нож",
+                    "serving": "Кунжут, Соевый соус",
+                    "instructions": [
+                        "1. Разверните лист лаваша на столе.",
+                        "2. Равномерно смажьте поверхность тонким слоем творожного сыра (не толстым, просто чтобы покрыть лаваш).",
+                        "3. Разложите листья салата.",
+                        "4. Тонко нарежьте сёмгу и равномерно распределите по всей поверхности.",
+                        "5. По желанию посыпьте кунжутом.",
+                        "6. Сверните лаваш в плотный рулет.",
+                        "7. По желанию уберите в холодильник на 30 минут, чтобы рулет уплотнился (можно есть и сразу).",
+                        "8. Нарежьте на кусочки и подавайте."
+                    ],
                     "ingredients": [
-                        {"name": "Мясной фарш", "amount": 150, "unit": "г", "category": "protein", "is_pantry": False, "estimated_price_rub": 180},
-                        {"name": "Спагетти", "amount": 100, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 60},
-                        {"name": "Оливковое масло", "amount": 1, "unit": "ст.л.", "category": "other", "is_pantry": True, "estimated_price_rub": 0}
+                        {"name": "Семга слабосоленая", "amount": 100 * persons, "unit": "г", "category": "protein", "is_pantry": False, "estimated_price_rub": 350},
+                        {"name": "Творожный сыр", "amount": 60 * persons, "unit": "г", "category": "dairy", "is_pantry": False, "estimated_price_rub": 120},
+                        {"name": "Армянский лаваш", "amount": 0.5 * persons, "unit": "лист", "category": "bakery", "is_pantry": False, "estimated_price_rub": 50},
+                        {"name": "Салат фриллис", "amount": 1, "unit": "пучок", "category": "vegetables", "is_pantry": False, "estimated_price_rub": 80},
+                        {"name": "Кунжут", "amount": 1, "unit": "ч.л.", "category": "other", "is_pantry": True, "estimated_price_rub": 0}
                     ]
                 }
             ]
         }
+
+
+async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
+    prompt = f"""
+    У нас есть блюдо: "{dish['title']}".
+    Текущая инструкция: {json.dumps(dish.get('instructions', []), ensure_ascii=False)}
+    Текущие ингредиенты: {json.dumps(dish['ingredients'], ensure_ascii=False)}
+
+    Задача: Замени ингредиент "{old_ingredient}" на адекватный аналог.
+    Обнови детальную инструкцию приготовления и список ингредиентов.
+
+    Верни ответ строго в формате JSON:
+    {{
+      "title": "Название блюда (можно изменить под замену)",
+      "cooking_time": "{dish.get('cooking_time', '15 мин')}",
+      "equipment": "{dish.get('equipment', 'Плита')}",
+      "serving": "{dish.get('serving', 'Свежая зелень')}",
+      "replacement_note": "Заменили {old_ingredient} на <новый продукт>",
+      "instructions": [
+        "1. Подробный шаг 1...",
+        "2. Подробный шаг 2..."
+      ],
+      "ingredients": [
+        {{
+          "name": "Название продукта",
+          "amount": 150,
+          "unit": "г",
+          "category": "protein/garnish/vegetables/dairy/bakery/other",
+          "is_pantry": false,
+          "estimated_price_rub": 180
+        }}
+      ]
+    }}
+    """
+
+    try:
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are an expert chef assistant returning JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logging.error(f"Error replacing ingredient: {e}")
+        return dish
+
+
+async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
+    veg_status = "Только вегетарианские блюда!" if vegetarian else "Любые блюда (мясо, птица, рыба, морепродукты)."
+
+    prompt = f"""
+    Пользователь хочет заменить блюдо "{old_dish_title}".
+    Предложи 3 альтернативных подробных варианта ужина на {persons} чел.
+    Требования: {veg_status}
+
+    Верни ответ строго в формате JSON:
+    {{
+      "options": [
+        {{
+          "title": "Название альтернативного блюда",
+          "cooking_time": "20 мин",
+          "equipment": "Плита/Сковорода",
+          "serving": "Зелень, соус",
+          "instructions": [
+            "1. Подробный шаг 1...",
+            "2. Подробный шаг 2..."
+          ],
+          "ingredients": [
+            {{
+              "name": "Название продукта",
+              "amount": 200,
+              "unit": "г",
+              "category": "protein",
+              "is_pantry": false,
+              "estimated_price_rub": 200
+            }}
+          ]
+        }}
+      ]
+    }}
+    """
+
+    try:
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a chef providing detailed alternative meal options in JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8
+        )
+        data = json.loads(response.choices[0].message.content)
+        return data.get("options", [])
+    except Exception as e:
+        logging.error(f"Error generating dish options: {e}")
+        return []
+
+
+def format_dish_text(dish: dict, idx: int, persons: int) -> str:
+    title = dish.get("title", "Блюдо")
+    time_str = dish.get("cooking_time", "15 мин")
+    equipment = dish.get("equipment", "Плита")
+    serving = dish.get("serving", "По вкусу")
+
+    ing_list = dish.get("ingredients", [])
+    ing_str = "\n".join([f"• {i['name']} — {i['amount']} {i['unit']}" for i in ing_list])
+
+    instructions = dish.get("instructions", [])
+    if isinstance(instructions, list):
+        inst_str = "\n".join(instructions)
+    else:
+        inst_str = str(instructions)
+
+    text = (
+        f"🍳 **{title.upper()}**\n"
+        f"⏱ {time_str} | 👤 На {persons} чел.\n\n"
+        f"🛒 **Ингредиенты:**\n{ing_str}\n\n"
+        f"🛠 **Оборудование:** {equipment}\n\n"
+        f"📖 **Инструкция:**\n{inst_str}\n\n"
+        f"🥗 **Подача:** {serving}"
+    )
+    return text
 
 
 # -------------------------------------------------------------------
@@ -185,10 +367,48 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=1, dinners=4, vegetarian=False)
     welcome_text = (
-        "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я формирую идеальное меню на неделю с генерацией фотографий блюд через YandexART, удобным списком покупок и расчётом стоимости!"
+        "🤖 **Art Gnomik Chef & Food Waste Optimizer** 🧙‍♂️🍝\n\n"
+        "Я генерирую подробные пошаговые рецепты на неделю без остатков продуктов и создаю фото блюд через YandexART!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    help_text = (
+        "🤖 **Food Waste Optimizer — Помощь**\n\n"
+        "Я помогу составить оптимальное меню на неделю с подробными рецептами и фото.\n\n"
+        "**Команды:**\n"
+        "/start — Начать подбор меню\n"
+        "/menu — Показать текущее сохраненное меню\n"
+        "/help — Эта справка\n\n"
+        "**Как это работает:**\n"
+        "1. Нажмите «Новая подборка» или «Настроить фильтрацию»\n"
+        "2. Укажите количество человек и ужинов\n"
+        "3. Получите подробные рецепты (с оборудованием, развернутыми шагами и вариантами подачи)!"
+    )
+    await message.answer(help_text, parse_mode="Markdown")
+
+
+@dp.message(Command("menu"))
+async def cmd_menu(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    dishes = data.get("current_dishes", [])
+
+    if not dishes:
+        await message.answer("У вас пока нет сохраненного меню. Нажмите /start!", reply_markup=main_keyboard())
+        return
+
+    text = "📋 **Ваше текущее меню на неделю:**\n\n"
+    for idx, dish in enumerate(dishes, 1):
+        text += f"**{idx}. {dish['title']}** ({dish.get('cooking_time', '15 мин')})\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Посмотреть список покупок 🛒", callback_data="get_shopping_list")],
+        [InlineKeyboardButton(text="Сгенерировать новое меню 🔄", callback_data="new_selection")]
+    ])
+
+    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
 
 @dp.callback_query(F.data == "settings")
@@ -245,7 +465,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("🤖 Составляю подборку ужинов и генерирую фото через YandexART...")
+    await call.message.answer("♻️ **Генерирую подробные рецепты и фото через YandexART...**")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -253,33 +473,198 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
     await state.update_data(current_dishes=dishes, total_rub=total_rub)
 
-    summary_text = "**Обновили список блюд** 🍿\n\n"
+    summary_text = "**Подборка ужинов готова!** 🍿\n\n"
 
-    for idx, dish in enumerate(dishes, 1):
+    for idx, dish in enumerate(dishes):
         title = dish['title']
-        time_str = dish.get("cooking_time", "25 мин")
-
-        summary_text += f"**{idx}** {title} ({time_str})\n"
+        summary_text += f"**{idx+1}.** {title} ({dish.get('cooking_time', '15 мин')})\n"
 
         img_bytes = await generate_yandex_art_bytes(title)
-        caption = f"**День {idx}: {title}**\n⏱ {time_str} | 👤 На {persons} перс.\n\n📖 **Рецепт:**\n{dish['recipe']}"
+        caption = format_dish_text(dish, idx, persons)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Заменить продукт 🔄", callback_data=f"replace_ing_select_{idx}"),
+                InlineKeyboardButton(text="Заменить это блюдо 🍝", callback_data=f"replace_dish_options_{idx}")
+            ]
+        ])
 
         if img_bytes:
-            photo_file = BufferedInputFile(img_bytes, filename=f"dish_{idx}.png")
-            await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown")
+            photo_file = BufferedInputFile(img_bytes, filename=f"dish_{idx+1}.png")
+            await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown", reply_markup=kb)
         else:
-            await call.message.answer(caption, parse_mode="Markdown")
+            await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    kb_final = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="Список продуктов 🛒", callback_data="get_shopping_list"),
-            InlineKeyboardButton(text="Заменить блюдо 🍝", callback_data="new_selection")
+            InlineKeyboardButton(text="Список покупок 🛒", callback_data="get_shopping_list"),
+            InlineKeyboardButton(text="Заменить ВСЮ подборку 🔄", callback_data="new_selection")
         ]
     ])
 
-    await call.message.answer(summary_text, parse_mode="Markdown", reply_markup=kb)
+    await call.message.answer(summary_text, parse_mode="Markdown", reply_markup=kb_final)
 
 
+# -------------------------------------------------------------------
+# ВЫБОР И ЗАМЕНА ИНГРЕДИЕНТОВ
+# -------------------------------------------------------------------
+@dp.callback_query(F.data.startswith("replace_ing_select_"))
+async def select_ingredient_to_replace(call: types.CallbackQuery, state: FSMContext):
+    dish_idx = int(call.data.split("_")[-1])
+    data = await state.get_data()
+    dishes = data.get("current_dishes", [])
+
+    if dish_idx >= len(dishes):
+        await call.answer("Блюдо не найдено")
+        return
+
+    dish = dishes[dish_idx]
+    ingredients = dish.get("ingredients", [])
+
+    buttons = []
+    for ing_idx, ing in enumerate(ingredients):
+        buttons.append([InlineKeyboardButton(
+            text=f"❌ {ing['name']}",
+            callback_data=f"do_replace_{dish_idx}_{ing_idx}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_replace")])
+
+    await call.message.reply(
+        f"Какой продукт из блюда **«{dish['title']}»** вы хотите заменить?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@dp.callback_query(F.data == "cancel_replace")
+async def cancel_replace(call: types.CallbackQuery):
+    await call.message.delete()
+
+
+@dp.callback_query(F.data.startswith("do_replace_"))
+async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    dish_idx = int(parts[2])
+    ing_idx = int(parts[3])
+
+    data = await state.get_data()
+    dishes = data.get("current_dishes", [])
+    persons = data.get("persons", 1)
+
+    if dish_idx >= len(dishes):
+        await call.answer("Ошибка поиска блюда")
+        return
+
+    dish = dishes[dish_idx]
+    target_ing = dish["ingredients"][ing_idx]["name"]
+
+    await call.message.edit_text(f"⏳ Пересчитываю детальный рецепт для **{target_ing}** в блюде «{dish['title']}»...", parse_mode="Markdown")
+
+    updated_dish = await replace_ingredient_in_dish(dish, target_ing)
+
+    dishes[dish_idx] = updated_dish
+    await state.update_data(current_dishes=dishes)
+
+    res_text = f"✅ **Замена выполнена!**\n\n" + format_dish_text(updated_dish, dish_idx, persons)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Заменить еще продукт 🔄", callback_data=f"replace_ing_select_{dish_idx}")],
+        [InlineKeyboardButton(text="Заменить само блюдо 🍝", callback_data=f"replace_dish_options_{dish_idx}")],
+        [InlineKeyboardButton(text="Обновленный список покупок 🛒", callback_data="get_shopping_list")]
+    ])
+
+    await call.message.edit_text(res_text, parse_mode="Markdown", reply_markup=kb)
+
+
+# -------------------------------------------------------------------
+# ВЫБОР И ЗАМЕНА ОДНОГО БЛЮДА НА ВЫБОР (3 ВАРИАНТА)
+# -------------------------------------------------------------------
+@dp.callback_query(F.data.startswith("replace_dish_options_"))
+async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
+    dish_idx = int(call.data.split("_")[-1])
+    data = await state.get_data()
+    dishes = data.get("current_dishes", [])
+    persons = data.get("persons", 1)
+    vegetarian = data.get("vegetarian", False)
+
+    if dish_idx >= len(dishes):
+        await call.answer("Блюдо не найдено")
+        return
+
+    old_dish = dishes[dish_idx]
+
+    await call.message.reply(
+        f"⏳ Подбираю 3 альтернативных варианта на замену **«{old_dish['title']}»**...",
+        parse_mode="Markdown"
+    )
+
+    options = await generate_dish_replacement_options(persons, vegetarian, old_dish['title'])
+
+    if not options:
+        await call.message.answer("Не удалось сгенерировать замену. Попробуйте еще раз!")
+        return
+
+    await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
+
+    buttons = []
+    for opt_idx, opt in enumerate(options):
+        buttons.append([InlineKeyboardButton(
+            text=f"✨ {opt['title']} ({opt.get('cooking_time', '15 мин')})",
+            callback_data=f"apply_dish_swap_{opt_idx}"
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_replace")])
+
+    await call.message.answer(
+        f"Выберите новое блюдо взамен **«{old_dish['title']}»**:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@dp.callback_query(F.data.startswith("apply_dish_swap_"))
+async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
+    opt_idx = int(call.data.split("_")[-1])
+    data = await state.get_data()
+
+    dish_idx = data.get("target_dish_idx")
+    dishes = data.get("current_dishes", [])
+    options = data.get("temp_replacement_options", [])
+    persons = data.get("persons", 1)
+
+    if dish_idx is None or opt_idx >= len(options) or dish_idx >= len(dishes):
+        await call.answer("Ошибка при замене блюда")
+        return
+
+    chosen_dish = options[opt_idx]
+    
+    dishes[dish_idx] = chosen_dish
+    await state.update_data(current_dishes=dishes)
+
+    await call.message.edit_text(f"🎨 Генерирую фото для **«{chosen_dish['title']}»** через YandexART...", parse_mode="Markdown")
+
+    img_bytes = await generate_yandex_art_bytes(chosen_dish['title'])
+    caption = f"🎉 **Блюдо успешно заменено!**\n\n" + format_dish_text(chosen_dish, dish_idx, persons)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Заменить продукт 🔄", callback_data=f"replace_ing_select_{dish_idx}"),
+            InlineKeyboardButton(text="Заменить это блюдо 🍝", callback_data=f"replace_dish_options_{dish_idx}")
+        ],
+        [InlineKeyboardButton(text="Обновленный список покупок 🛒", callback_data="get_shopping_list")]
+    ])
+
+    if img_bytes:
+        photo_file = BufferedInputFile(img_bytes, filename=f"dish_{dish_idx+1}.png")
+        await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown", reply_markup=kb)
+        await call.message.delete()
+    else:
+        await call.message.edit_text(caption, parse_mode="Markdown", reply_markup=kb)
+
+
+# -------------------------------------------------------------------
+# СПИСОК ПОКУПОК
+# -------------------------------------------------------------------
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -345,8 +730,9 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     min_price = int(calculated_total * 0.9) if calculated_total > 0 else 1200
     max_price = int(calculated_total * 1.15) if calculated_total > 0 else 1600
 
-    res += f"💳 **Примерная стоимость корзины покупок:**\n"
-    res += f"~ {min_price} – {max_price} ₽ *(оценка на основе средних цен супермаркетов)*"
+    res += f"💳 **Примерная стоимость корзины:**\n"
+    res += f"~ {min_price} – {max_price} ₽ *(оценка на основе цен супермаркетов)*\n\n"
+    res += "💡 *Меню оптимизировано для минимизации остатков!*"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В главное меню 🏠", callback_data="back_main")]
@@ -386,6 +772,7 @@ async def start_web_server():
 async def main():
     logging.basicConfig(level=logging.INFO)
     await start_web_server()
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
