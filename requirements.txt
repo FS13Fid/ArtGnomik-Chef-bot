@@ -1,3 +1,4 @@
-aiogram==3.1.1
+aiogram>=3.12.0
 aiohttp
-openai
+openai>=1.30.0
+httpx>=0.27.0
