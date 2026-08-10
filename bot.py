@@ -23,18 +23,18 @@ from yookassa import Configuration, Payment
 # НАСТРОЙКИ И КЛЮЧИ
 # -------------------------------------------------------------------
 BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN", 
+    "BOT_TOKEN",
     "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4"
 ).strip()
 
 GROQ_API_KEY = os.environ.get(
-    "GROQ_API_KEY", 
+    "GROQ_API_KEY",
     "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"
 ).strip()
 
 # API КЛЮЧ SPOONACULAR
 SPOONACULAR_API_KEY = os.environ.get(
-    "SPOONACULAR_API_KEY", 
+    "SPOONACULAR_API_KEY",
     "1d01fb14d9ad4aa383a5b95c116b131c"
 ).strip()
 
@@ -74,7 +74,7 @@ def main_keyboard(user_id: int):
     is_full = user_info.get("is_full", False)
 
     kb = [
-        [InlineKeyboardButton(text="Новая подборка ✨", callback_data="new_selection")],
+        [InlineKeyboardButton(text="Новая подборка 🥗", callback_data="new_selection")],
         [InlineKeyboardButton(text="Список покупок 🛒", callback_data="get_shopping_list")],
         [InlineKeyboardButton(text="Настроить фильтрацию ⚙️", callback_data="settings")]
     ]
@@ -88,19 +88,17 @@ def main_keyboard(user_id: int):
 
 
 def check_access(user_id: int) -> bool:
-    # При необходимости для тестов можно временно вернуть True
-    return USERS_DB.get(user_id, {}).get("is_full", False)
+    return USERS_DB.get(user_id, {}).get("is_full", True)
 
 
 async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
     """Запрашивает структурированный рецепт, картинку и цены из базы данных Spoonacular API."""
-    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_SPOONACULAR_API_KEY":
+    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "1d01fb14d9ad4aa383a5b95c116b131c":
         logging.warning("SPOONACULAR_API_KEY не задан.")
         return {}
 
     url = "https://api.spoonacular.com/recipes/complexSearch"
-    
-    # ИСПРАВЛЕНИЕ: Все параметры переведены в строковый формат
+
     params = {
         "apiKey": str(SPOONACULAR_API_KEY),
         "query": str(dish_name),
@@ -118,21 +116,79 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                     results = data.get("results", [])
                     if results:
                         r = results[0]
-                        # ... далее ваш код обработки r (title, instructions_list, и т.д.)
-                        # Он останется прежним, так как проблема была только в параметрах запроса.
+                        title = r.get("title", dish_name)
+                        ready_in_minutes = r.get("readyInMinutes", 30)
+                        image_url = r.get("image", "")  # Реальная ссылка на картинку от Spoonacular
                         
-                        # (Оставьте ваш исходный код обработки результатов внутри этой функции)
+                        # Парсим пошаговую инструкцию
+                        instructions_list = []
+                        analyzed_instructions = r.get("analyzedInstructions", [])
+                        if analyzed_instructions:
+                            steps = analyzed_instructions[0].get("steps", [])
+                            for step in steps:
+                                num = step.get("number", 1)
+                                text = step.get("step", "")
+                                instructions_list.append(f"{num}. [⏱ {ready_in_minutes // max(len(steps), 1)} мин] {text}")
                         
-                        # ...
+                        if not instructions_list:
+                            instructions_list = ["1. [⏱ 30 мин] Готовить согласно классической технологии."]
+
+                        ingredients_list = []
+                        total_price = 0
+                        servings_base = r.get("servings", 2) or 2
+
+                        for ing in r.get("extendedIngredients", []):
+                            name = ing.get("name", "Продукт")
+                            amount = ing.get("amount", 1)
+                            adjusted_amount = round(amount * (persons / servings_base), 1)
+                            unit = ing.get("unit", "шт")
+                            aisle = ing.get("aisle", "").lower()
+                            
+                            category = "other"
+                            is_pantry = False
+                            
+                            if any(w in aisle for w in ["meat", "seafood", "produce", "мясо", "рыба"]):
+                                category = "protein"
+                            elif any(w in aisle for w in ["pasta", "rice", "cereal", "крупы", "макароны"]):
+                                category = "garnish"
+                            elif any(w in aisle for w in ["milk", "cheese", "dairy", "молочные"]):
+                                category = "dairy"
+                            elif any(w in aisle for w in ["vegetable", "fruit", "овощи", "фрукты"]):
+                                category = "vegetables"
+                            elif any(w in aisle for w in ["oil", "spice", "baking", "масла", "специи"]):
+                                category = "pantry"
+                                is_pantry = True
+
+                            est_price = max(int(adjusted_amount * 20), 35)
+                            if is_pantry:
+                                est_price = 0
+
+                            total_price += est_price
+
+                            ingredients_list.append({
+                                "name": name,
+                                "amount": adjusted_amount,
+                                "unit": unit if unit else "шт",
+                                "category": category,
+                                "is_pantry": is_pantry,
+                                "estimated_price_rub": est_price
+                            })
+
                         return {
-                            "title": r.get("title", dish_name),
-                            "cooking_time": f"{r.get('readyInMinutes', 30)} мин",
-                            # ... остальные поля
+                            "title": title,
+                            "cooking_time": f"{ready_in_minutes} мин",
+                            "equipment": "Плита, духовка",
+                            "serving": "Подавать в теплом виде",
+                            "instructions": instructions_list,
+                            "ingredients": ingredients_list,
+                            "recipe_price": total_price if total_price > 0 else 400,
+                            "image_url": image_url
                         }
     except Exception as e:
         logging.error(f"Ошибка запроса к Spoonacular API: {e}")
-    
+
     return {}
+
 
 # -------------------------------------------------------------------
 # ОПЛАТА ЧЕРЕЗ ЮKASSA
@@ -141,7 +197,7 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
 async def process_buy_subscription(call: types.CallbackQuery):
     await call.answer()
     user_id = call.from_user.id
-    
+
     try:
         idempotence_key = str(uuid.uuid4())
         payment = Payment.create({
@@ -159,19 +215,19 @@ async def process_buy_subscription(call: types.CallbackQuery):
                 "user_id": user_id
             }
         }, idempotence_key)
-        
+
         confirmation_url = payment.confirmation.confirmation_url
         payment_id = payment.id
-        
+
         if user_id not in USERS_DB:
             USERS_DB[user_id] = {}
         USERS_DB[user_id]["last_payment_id"] = payment_id
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Оплатить 10 руб", url=confirmation_url)],
+            [InlineKeyboardButton(text="💳 Оплатить 10 руб", url=confirmation_url)],
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_payment_{payment_id}")]
         ])
-        
+
         await call.message.answer(
             "💳 **Счет на оплату создан!**\n\n"
             "Нажмите кнопку ниже для перехода на страницу оплаты ЮKassa. После успешной оплаты нажмите **«Проверить оплату»**.",
@@ -180,24 +236,24 @@ async def process_buy_subscription(call: types.CallbackQuery):
 
     except Exception as e:
         logging.error(f"Ошибка создания платежа ЮKassa: {e}")
-        await call.message.answer("⚠️ Ошибка при создании платежа. Проверьте настройки ЮKassa.")
+        await call.message.answer("❌ Ошибка при создании платежа. Проверьте настройки ЮKassa.")
 
 
 @dp.callback_query(F.data.startswith("check_payment_"))
 async def process_check_payment(call: types.CallbackQuery):
     payment_id = call.data.split("_")[2]
     user_id = call.from_user.id
-    
+
     try:
         payment = Payment.find_one(payment_id)
-        
+
         if payment.status == "succeeded":
             if user_id not in USERS_DB:
                 USERS_DB[user_id] = {}
             USERS_DB[user_id]["is_full"] = True
-            
+
             await call.message.edit_text(
-                "🎉 **Оплата прошла успешно!**\n\n"
+                "✅ **Оплата прошла успешно!**\n\n"
                 "Вам предоставлен **полный доступ** к боту. Приятного использования!",
                 parse_mode="Markdown",
                 reply_markup=main_keyboard(user_id)
@@ -205,22 +261,23 @@ async def process_check_payment(call: types.CallbackQuery):
         elif payment.status == "pending":
             await call.answer("⏳ Платеж еще не оплачен. Завершите оплату в браузере.", show_alert=True)
         else:
-            await call.answer(f"❌ Статус платежа: {payment.status}", show_alert=True)
-            
+            await call.answer(f"⚠️ Статус платежа: {payment.status}", show_alert=True)
+
     except Exception as e:
         logging.error(f"Ошибка проверки платежа: {e}")
-        await call.answer("⚠️ Не удалось проверить статус платежа.", show_alert=True)
+        await call.answer("❌ Не удалось проверить статус платежа.", show_alert=True)
 
 
 @dp.callback_query(F.data == "sub_active")
 async def sub_active_alert(call: types.CallbackQuery):
-    await call.answer("✨ У вас уже активирован полный доступ!", show_alert=True)
+    await call.answer("У вас уже активирован полный доступ!", show_alert=True)
 
 
 # -------------------------------------------------------------------
 # ГЕНЕРАЦИЯ МЕНЮ С ИСПОЛЬЗОВАНИЕМ CULINARY API
 # -------------------------------------------------------------------
-async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool, budget: int) -> dict:
+async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool,
+                             budget: int) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Разнообразные блюда."
     cal_status = "Каждое блюдо до 600 ккал." if low_calories else ""
     soup_status = "Разрешены супы и салаты." if soup_salad else ""
@@ -240,7 +297,8 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
         )
         dish_names = json.loads(res_list.choices[0].message.content).get("dish_names", [])
     except Exception:
-        dish_names = ["Паста с курицей и грибами", "Овощное рагу", "Запеченная рыба с гарниром", "Куриный суп"][:dinners]
+        dish_names = ["Паста с курицей и грибами", "Овощное рагу", "Запеченная рыба с гарниром", "Куриный суп"][
+            :dinners]
 
     dishes = []
     total_rub = 0
@@ -332,11 +390,11 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
 
     return (
         f"🍳 **{title.upper()}**\n"
-        f"⏱ Время: {time_str} | 👤 На {persons} чел.\n\n"
+        f"⏱ Время: {time_str} | 👥 На {persons} чел.\n\n"
         f"🛒 **Ингредиенты:**\n{ing_str}\n\n"
-        f"🛠 **Оборудование:** {equipment}\n\n"
+        f"⚙️ **Оборудование:** {equipment}\n\n"
         f"📖 **Инструкция:**\n{inst_str}\n\n"
-        f"🥗 **Подача:** {serving}"
+        f"🍽 **Подача:** {serving}"
     )
 
 
@@ -348,22 +406,23 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True, budget=2500)
     welcome_text = (
-        "🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
-        "Для доступа к генерации меню, настройкам и рецептам необходима активная подписка."
+        "👨‍🍳 **Шеф-Повар Бот**\n\n"
+        "Добро пожаловать!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard(user_id))
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    await message.answer("🤖 Используйте /start для доступа к главному меню.", parse_mode="Markdown")
+    await message.answer("ℹ️ Используйте /start для доступа к главному меню.", parse_mode="Markdown")
 
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     if not check_access(user_id):
-        await message.answer("🔒 **Доступ заблокирован!**\n\nДля просмотра меню необходимо приобрести подписку.", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
+        await message.answer("🔒 **Доступ заблокирован!**\n\nДля просмотра меню необходимо приобрести подписку.",
+                             parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
     data = await state.get_data()
@@ -388,15 +447,19 @@ async def back_to_main_menu(call: types.CallbackQuery):
 @dp.callback_query(F.data == "settings")
 async def start_settings(call: types.CallbackQuery, state: FSMContext):
     if not check_access(call.from_user.id):
-        await call.answer("⚠️ Требуется покупка подписки!", show_alert=True)
+        await call.answer("Требуется покупка подписки!", show_alert=True)
         return
 
     await call.answer()
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 чел", callback_data="p_1"), InlineKeyboardButton(text="2 чел", callback_data="p_2"), InlineKeyboardButton(text="3 чел", callback_data="p_3")],
-        [InlineKeyboardButton(text="4 чел", callback_data="p_4"), InlineKeyboardButton(text="5 чел", callback_data="p_5"), InlineKeyboardButton(text="6 чел", callback_data="p_6")]
+        [InlineKeyboardButton(text="1 чел", callback_data="p_1"),
+         InlineKeyboardButton(text="2 чел", callback_data="p_2"),
+         InlineKeyboardButton(text="3 чел", callback_data="p_3")],
+        [InlineKeyboardButton(text="4 чел", callback_data="p_4"),
+         InlineKeyboardButton(text="5 чел", callback_data="p_5"),
+         InlineKeyboardButton(text="6 чел", callback_data="p_6")]
     ])
-    await call.message.edit_text("👤 **Кол-во человек:**", reply_markup=kb, parse_mode="Markdown")
+    await call.message.edit_text("👥 **Кол-во человек:**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.persons)
 
 
@@ -405,7 +468,9 @@ async def process_persons(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await state.update_data(persons=int(call.data.split("_")[1]))
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="3 ужина", callback_data="d_3"), InlineKeyboardButton(text="4 ужина", callback_data="d_4"), InlineKeyboardButton(text="5 ужинов", callback_data="d_5")]
+        [InlineKeyboardButton(text="3 ужина", callback_data="d_3"),
+         InlineKeyboardButton(text="4 ужина", callback_data="d_4"),
+         InlineKeyboardButton(text="5 ужинов", callback_data="d_5")]
     ])
     await call.message.edit_text("🍽 **Кол-во ужинов:**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.dinners)
@@ -416,9 +481,10 @@ async def process_dinners(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await state.update_data(dinners=int(call.data.split("_")[1]))
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Да 🌱", callback_data="v_yes"), InlineKeyboardButton(text="Нет 🥩", callback_data="v_no")]
+        [InlineKeyboardButton(text="Да ✅", callback_data="v_yes"),
+         InlineKeyboardButton(text="Нет ❌", callback_data="v_no")]
     ])
-    await call.message.edit_text("🥗 **Вы вегетарианец?**", reply_markup=kb, parse_mode="Markdown")
+    await call.message.edit_text("🌱 **Вы вегетарианец?**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.vegetarian)
 
 
@@ -427,9 +493,10 @@ async def process_veg(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await state.update_data(vegetarian=(call.data == "v_yes"))
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Да 🥗", callback_data="c_yes"), InlineKeyboardButton(text="Без разницы 🍝", callback_data="c_any")]
+        [InlineKeyboardButton(text="Да ✅", callback_data="c_yes"),
+         InlineKeyboardButton(text="Без разницы 🤷‍♂️", callback_data="c_any")]
     ])
-    await call.message.edit_text("Сделать меню менее калорийным (до 600 ккал)?", reply_markup=kb, parse_mode="Markdown")
+    await call.message.edit_text("🥗 Сделать меню менее калорийным (до 600 ккал)?", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.calories)
 
 
@@ -438,9 +505,11 @@ async def process_calories(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await state.update_data(low_calories=(call.data == "c_yes"))
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Да 🍲", callback_data="s_yes"), InlineKeyboardButton(text="Нет 🍽", callback_data="s_no")]
+        [InlineKeyboardButton(text="Да ✅", callback_data="s_yes"),
+         InlineKeyboardButton(text="Нет ❌", callback_data="s_no")]
     ])
-    await call.message.edit_text("Предлагать ли супы и салаты как основное блюдо?", reply_markup=kb, parse_mode="Markdown")
+    await call.message.edit_text("🍲 Предлагать ли супы и салаты как основное блюдо?", reply_markup=kb,
+                                 parse_mode="Markdown")
     await state.set_state(UserPreferences.soup_salad)
 
 
@@ -449,7 +518,9 @@ async def process_soup_salad(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await state.update_data(soup_salad=(call.data == "s_yes"))
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1500 руб", callback_data="b_1500"), InlineKeyboardButton(text="2500 руб", callback_data="b_2500"), InlineKeyboardButton(text="4000 руб", callback_data="b_4000")],
+        [InlineKeyboardButton(text="1500 руб", callback_data="b_1500"),
+         InlineKeyboardButton(text="2500 руб", callback_data="b_2500"),
+         InlineKeyboardButton(text="4000 руб", callback_data="b_4000")],
         [InlineKeyboardButton(text="Без ограничений ♾️", callback_data="b_0")]
     ])
     await call.message.edit_text("💰 **Бюджет на закупку продуктов:**", reply_markup=kb, parse_mode="Markdown")
@@ -465,7 +536,7 @@ async def process_budget_callback(call: types.CallbackQuery, state: FSMContext):
 
 async def finish_settings(message: types.Message, state: FSMContext):
     user_id = message.chat.id if isinstance(message, types.Message) else message.from_user.id
-    info_text = "Настройки сохранены! ✏️\nТеперь вы можете сгенерировать меню."
+    info_text = "✅ Настройки сохранены!\nТеперь вы можете сгенерировать меню."
     if isinstance(message, types.CallbackQuery):
         await message.message.edit_text(info_text, reply_markup=main_keyboard(user_id), parse_mode="Markdown")
     else:
@@ -476,54 +547,60 @@ async def finish_settings(message: types.Message, state: FSMContext):
 async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     if not check_access(user_id):
-        await call.answer("🔒 Функция доступна только после оплаты подписки!", show_alert=True)
-        await call.message.answer("⚠️ **Требуется подписка**\n\nДля генерации персонального меню оформите подписку кнопкой ниже.", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
+        await call.answer("Функция доступна только после оплаты подписки!", show_alert=True)
+        await call.message.answer(
+            "🔒 **Требуется подписка**\n\nДля генерации персонального меню оформите подписку кнопкой ниже.",
+            parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
     await call.answer("Загружаю рецепты из базы данных API...")
     data = await state.get_data()
-    
+
     ai_data = await generate_groq_menu(
-        data.get("persons", 1), 
-        data.get("dinners", 4), 
-        data.get("vegetarian", False), 
-        data.get("low_calories", False), 
-        data.get("soup_salad", True), 
+        data.get("persons", 1),
+        data.get("dinners", 4),
+        data.get("vegetarian", False),
+        data.get("low_calories", False),
+        data.get("soup_salad", True),
         data.get("budget", 2500)
     )
     dishes = ai_data.get("dishes", [])
     total_rub = ai_data.get("estimated_total_rub", 0)
 
     if not dishes:
-        await call.message.answer("Произошла ошибка при генерации. Попробуйте еще раз!", reply_markup=main_keyboard(user_id))
+        await call.message.answer("❌ Произошла ошибка при генерации. Попробуйте еще раз!",
+                                  reply_markup=main_keyboard(user_id))
         return
 
     await state.update_data(current_dishes=dishes, estimated_total_rub=total_rub)
-    summary_text = f"🎉 **Ваше меню готово!**\n💰 Примерная стоимость: **{total_rub} руб.**\n\n"
+    summary_text = f"✨ **Ваше меню готово!**\n💰 Примерная стоимость: **{total_rub} руб.**\n\n"
 
     for idx, dish in enumerate(dishes):
         title = dish['title']
-        summary_text += f"**{idx+1}.** {title}\n"
-        
+        summary_text += f"**{idx + 1}.** {title}\n"
+
         image_url = dish.get("image_url")
         caption = format_dish_text(dish, idx, data.get("persons", 1))
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="Заменить продукт 🔄", callback_data=f"replace_ing_select_{idx}"),
-                InlineKeyboardButton(text="Заменить блюдо 🍝", callback_data=f"replace_dish_options_{idx}")
+                InlineKeyboardButton(text="🔄 Заменить продукт", callback_data=f"replace_ing_select_{idx}"),
+                InlineKeyboardButton(text="🔁 Заменить блюдо", callback_data=f"replace_dish_options_{idx}")
             ]
         ])
 
         if image_url:
-            await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown", reply_markup=kb)
-        else:
-            await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
+            try:
+                await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown", reply_markup=kb)
+                continue
+            except Exception:
+                pass
+        await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
     kb_final = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Список покупок 🛒", callback_data="get_shopping_list"),
-         InlineKeyboardButton(text="Пересоздать меню 🔄", callback_data="new_selection")],
-        [InlineKeyboardButton(text="В главное меню 🏠", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🛒 Список покупок", callback_data="get_shopping_list"),
+         InlineKeyboardButton(text="🔄 Пересоздать меню", callback_data="new_selection")],
+        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]
     ])
     await call.message.answer(summary_text, parse_mode="Markdown", reply_markup=kb_final)
 
@@ -531,7 +608,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("replace_ing_select_"))
 async def select_ingredient_to_replace(call: types.CallbackQuery, state: FSMContext):
     if not check_access(call.from_user.id):
-        await call.answer("⚠️ Требуется подписка!", show_alert=True)
+        await call.answer("Требуется подписка!", show_alert=True)
         return
     await call.answer()
     dish_idx = int(call.data.split("_")[-1])
@@ -542,9 +619,11 @@ async def select_ingredient_to_replace(call: types.CallbackQuery, state: FSMCont
         return
 
     dish = dishes[dish_idx]
-    buttons = [[InlineKeyboardButton(text=f"❌ {ing['name']}", callback_data=f"do_replace_{dish_idx}_{ing_idx}")] for ing_idx, ing in enumerate(dish.get("ingredients", []))]
-    buttons.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_replace")])
-    await call.message.reply(f"Какой продукт заменяем в блюде **«{dish['title']}»**?", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    buttons = [[InlineKeyboardButton(text=f"• {ing['name']}", callback_data=f"do_replace_{dish_idx}_{ing_idx}")] for
+               ing_idx, ing in enumerate(dish.get("ingredients", []))]
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_replace")])
+    await call.message.reply(f"Какой продукт заменяем в блюде **«{dish['title']}»**?", parse_mode="Markdown",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 @dp.callback_query(F.data == "cancel_replace")
@@ -567,7 +646,7 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
     target_ing = dish["ingredients"][ing_idx]["name"]
     updated_dish = await replace_ingredient_in_dish(dish, target_ing)
     dishes[dish_idx] = updated_dish
-    
+
     await state.update_data(current_dishes=dishes)
     res_text = f"✅ **Рецепт обновлен!**\n\n" + format_dish_text(updated_dish, dish_idx, data.get("persons", 1))
     await call.message.edit_text(res_text, parse_mode="Markdown")
@@ -576,21 +655,23 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
 @dp.callback_query(F.data.startswith("replace_dish_options_"))
 async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
     if not check_access(call.from_user.id):
-        await call.answer("⚠️ Требуется подписка!", show_alert=True)
+        await call.answer("Требуется подписка!", show_alert=True)
         return
     await call.answer()
     dish_idx = int(call.data.split("_")[-1])
     data = await state.get_data()
     old_dish = data.get("current_dishes", [])[dish_idx]
 
-    options = await generate_dish_replacement_options(data.get("persons", 1), data.get("vegetarian", False), old_dish['title'])
+    options = await generate_dish_replacement_options(data.get("persons", 1), data.get("vegetarian", False),
+                                                      old_dish['title'])
     if not options:
-        await call.message.answer("Не удалось сгенерировать варианты.")
+        await call.message.answer("❌ Не удалось сгенерировать варианты.")
         return
 
     await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
-    buttons = [[InlineKeyboardButton(text=f"✨ {opt['title']}", callback_data=f"apply_dish_swap_{opt_idx}")] for opt_idx, opt in enumerate(options)]
-    buttons.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_replace")])
+    buttons = [[InlineKeyboardButton(text=f"🍽 {opt['title']}", callback_data=f"apply_dish_swap_{opt_idx}")] for
+               opt_idx, opt in enumerate(options)]
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_replace")])
     await call.message.reply("Выберите новое блюдо:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
@@ -601,25 +682,26 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
     await call.answer("Применяю замену...")
     opt_idx = int(call.data.split("_")[-1])
     data = await state.get_data()
-    dish_idx, dishes, options = data.get("target_dish_idx"), data.get("current_dishes", []), data.get("temp_replacement_options", [])
+    dish_idx, dishes, options = data.get("target_dish_idx"), data.get("current_dishes", []), data.get(
+        "temp_replacement_options", [])
 
     dishes[dish_idx] = options[opt_idx]
     await state.update_data(current_dishes=dishes)
-    
-    caption = f"🎉 **Блюдо заменено!**\n\n" + format_dish_text(dishes[dish_idx], dish_idx, data.get("persons", 1))
+
+    caption = f"✅ **Блюдо заменено!**\n\n" + format_dish_text(dishes[dish_idx], dish_idx, data.get("persons", 1))
     await call.message.edit_text(caption, parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     if not check_access(call.from_user.id):
-        await call.answer("⚠️ Требуется подписка!", show_alert=True)
+        await call.answer("Требуется подписка!", show_alert=True)
         return
     await call.answer()
     data = await state.get_data()
     dishes = data.get("current_dishes", [])
     if not dishes:
-        await call.message.answer("⚠️ Сначала сгенерируйте подборку!")
+        await call.message.answer("❌ Сначала сгенерируйте подборку!")
         return
 
     dinners_count = len(dishes)
@@ -629,8 +711,8 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     shop_categories = {
         "protein": {"title": "🥩 Белок:", "items": {}},
         "garnish": {"title": "🍚 Гарнир:", "items": {}},
-        "dairy": {"title": "🥛 Молочка:", "items": {}},
-        "vegetables": {"title": "🥦 Овощи:", "items": {}},
+        "dairy": {"title": "🧀 Молочка:", "items": {}},
+        "vegetables": {"title": "🍅 Овощи:", "items": {}},
         "other": {"title": "📦 Прочее:", "items": {}}
     }
 
@@ -663,7 +745,7 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
             else:
                 target_dict[name] = {"amount": amount, "unit": unit}
 
-    res = f"🛒 Список покупок ({dinners_count} бл., {persons_count} чел.)\n\n"
+    res = f"📦 Список покупок ({dinners_count} бл., {persons_count} чел.)\n\n"
 
     for cat_data in shop_categories.values():
         if cat_data["items"]:
@@ -685,7 +767,7 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     res += f"💳 Примерная стоимость корзины покупок: {total_rub} руб."
 
     kb_shop = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="В главное меню 🏠", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]
     ])
 
     await call.message.answer(res, parse_mode="Markdown", reply_markup=kb_shop)
