@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-import urllib.parse
+import base64
 import uuid
 from typing import Dict
 
@@ -12,18 +12,30 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiohttp import web
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 
 # Импортируем официальный SDK ЮKassa
 from yookassa import Configuration, Payment
 
 # -------------------------------------------------------------------
-# НАСТРОЙКИ И КЛЮЧИ (БЕЗОПАСНОЕ ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ)
+# НАСТРОЙКИ И КЛЮЧИ
 # -------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+
+# НАСТРОЙКИ YANDEX CLOUD (Yandex ART)
+YANDEX_CLOUD_FOLDER = os.environ.get("YANDEX_CLOUD_FOLDER", "b1gqkn7qf0sab32u6ghg").strip()
+YANDEX_CLOUD_API_KEY = os.environ.get("YANDEX_CLOUD_API_KEY", "").strip()
+YANDEX_CLOUD_MODEL = "yandex-art-2.0/latest"
+
+# Синхронный клиент OpenAI для генерации картинок через Yandex
+yandex_openai_client = OpenAI(
+    api_key=YANDEX_CLOUD_API_KEY,
+    base_url="https://ai.api.cloud.yandex.net/v1",
+    project=YANDEX_CLOUD_FOLDER
+)
 
 # ОСНОВНАЯ И РЕЗЕРВНАЯ МОДЕЛИ (Groq)
 groq_client = AsyncOpenAI(
@@ -32,7 +44,6 @@ groq_client = AsyncOpenAI(
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# РЕЗЕРВНЫЙ КЛИЕНТ (вторая модель Groq для подстраховки)
 reserve_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
@@ -87,37 +98,28 @@ def check_access(user_id: int) -> bool:
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ КАРТИНОК ЧЕРЕЗ POLLINATIONS.AI (БЕЗ КЛЮЧЕЙ И ОШИБОК)
+# ГЕНЕРАЦИЯ КАРТИНОК ЧЕРЕЗ YANDEX ART
 # -------------------------------------------------------------------
-async def fetch_dish_image(dish_name: str) -> str:
-    """Генерирует уникальную картинку блюда через бесплатный API Pollinations.ai без ключей."""
+async def fetch_dish_image(dish_name: str) -> bytes | None:
+    """Генерирует картинку блюда через Yandex ART и возвращает байты изображения."""
     try:
-        prompt_text = f"Professional food photography of {dish_name}, restaurant quality, appetizing, highly detailed, 4k"
-        encoded_prompt = urllib.parse.quote(prompt_text)
+        prompt_text = f"Профессиональная фотография еды: {dish_name}, ресторанная подача, аппетитно, высокая детализация"
         
-        # Pollinations отдает прямую картинку по URL
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true"
-        return image_url
+        # Запускаем в отдельном потоке, так как клиенты OpenAI синхронные в данном вызове
+        def generate_sync():
+            img = yandex_openai_client.images.generate(
+                model=f"art://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
+                prompt=prompt_text,
+                size="1024x1024"
+            )
+            return base64.b64decode(img.data[0].b64_json)
+
+        image_bytes = await asyncio.to_thread(generate_sync)
+        return image_bytes
             
     except Exception as e:
-        logging.error(f"Ошибка генерации картинки через Pollinations: {e}")
-
-    # Надежная резервная база на случай сбоя сети
-    name_lower = dish_name.lower()
-    if "суп" in name_lower or "борщ" in name_lower or "бульон" in name_lower or "щи" in name_lower:
-        return "https://images.unsplash.com/photo-1547592166-23ac45744acd?w=800&auto=format&fit=crop&q=80"
-    elif "салат" in name_lower:
-        return "https://images.unsplash.com/photo-1540420773420-3366772f4999?w=800&auto=format&fit=crop&q=80"
-    elif "паст" in name_lower or "спагетти" in name_lower or "макарон" in name_lower:
-        return "https://images.unsplash.com/photo-1621996346565-e3d5d6281298?w=800&auto=format&fit=crop&q=80"
-    elif "куриц" in name_lower or "индейк" in name_lower or "филе" in name_lower:
-        return "https://images.unsplash.com/photo-1604908176997-125f2596f378?w=800&auto=format&fit=crop&q=80"
-    elif "мяс" in name_lower or "стейк" in name_lower or "говядин" in name_lower or "свинин" in name_lower:
-        return "https://images.unsplash.com/photo-1544025162-d76694265947?w=800&auto=format&fit=crop&q=80"
-    elif "рыб" in name_lower or "лосось" in name_lower or "треск" in name_lower:
-        return "https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?w=800&auto=format&fit=crop&q=80"
-    
-    return "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&auto=format&fit=crop&q=80"
+        logging.error(f"Ошибка генерации картинки через Yandex ART: {e}")
+        return None
 
 
 # -------------------------------------------------------------------
@@ -530,8 +532,8 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
         summary_text += f"**{idx + 1}.** {title}\n"
         caption = format_dish_text(dish, idx, data.get("persons", 1))
 
-        # Генерируем картинку через Pollinations
-        image_url = await fetch_dish_image(title)
+        # Генерируем картинку через Yandex ART
+        image_bytes = await fetch_dish_image(title)
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -540,11 +542,13 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             ]
         ])
 
-        try:
-            await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown", reply_markup=kb)
-            continue
-        except Exception as e:
-            logging.error(f"Не удалось отправить фото: {e}")
+        if image_bytes:
+            try:
+                photo_file = BufferedInputFile(image_bytes, filename=f"dish_{idx}.jpg")
+                await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown", reply_markup=kb)
+                continue
+            except Exception as e:
+                logging.error(f"Не удалось отправить фото: {e}")
 
         await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
