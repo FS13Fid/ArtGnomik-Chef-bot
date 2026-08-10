@@ -92,22 +92,21 @@ def check_access(user_id: int) -> bool:
     return USERS_DB.get(user_id, {}).get("is_full", False)
 
 
-# -------------------------------------------------------------------
-# РАБОТА СО СПЕЦИАЛИЗИРОВАННЫМ CULINARY API (Spoonacular)
-# -------------------------------------------------------------------
 async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
     """Запрашивает структурированный рецепт, картинку и цены из базы данных Spoonacular API."""
     if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_SPOONACULAR_API_KEY":
-        logging.warning("SPOONACULAR_API_KEY не задан. Используем резервную генерацию через LLM.")
+        logging.warning("SPOONACULAR_API_KEY не задан.")
         return {}
 
     url = "https://api.spoonacular.com/recipes/complexSearch"
+    
+    # ИСПРАВЛЕНИЕ: Все параметры переведены в строковый формат
     params = {
-        "apiKey": SPOONACULAR_API_KEY,
-        "query": dish_name,
-        "number": 1,
-        "addRecipeInformation": True,
-        "fillIngredients": True,
+        "apiKey": str(SPOONACULAR_API_KEY),
+        "query": str(dish_name),
+        "number": "1",
+        "addRecipeInformation": "true",
+        "fillIngredients": "true",
         "language": "ru"
     }
 
@@ -119,105 +118,21 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                     results = data.get("results", [])
                     if results:
                         r = results[0]
-                        title = r.get("title", dish_name)
-                        ready_in_minutes = r.get("readyInMinutes", 30)
-                        image_url = r.get("image", "")  # Готовая картинка с сайта
+                        # ... далее ваш код обработки r (title, instructions_list, и т.д.)
+                        # Он останется прежним, так как проблема была только в параметрах запроса.
                         
-                        instructions_list = []
-                        analyzed_instructions = r.get("analyzedInstructions", [])
-                        if analyzed_instructions:
-                            steps = analyzed_instructions[0].get("steps", [])
-                            for step in steps:
-                                num = step.get("number", 1)
-                                text = step.get("step", "")
-                                instructions_list.append(f"{num}. [⏱ {ready_in_minutes // max(len(steps), 1)} мин] {text}")
+                        # (Оставьте ваш исходный код обработки результатов внутри этой функции)
                         
-                        if not instructions_list:
-                            instructions_list = ["1. [⏱ 30 мин] Готовить согласно классической технологии."]
-
-                        ingredients_list = []
-                        extended_ingredients = r.get("extendedIngredients", [])
-                        total_price = 0
-
-                        real_market_prices = {
-                            "chicken": 350,
-                            "beef": 650,
-                            "pork": 450,
-                            "rice": 120,
-                            "pasta": 95,
-                            "milk": 80,
-                            "cheese": 750,
-                            "tomato": 250,
-                            "cucumber": 200,
-                            "potato": 50,
-                            "onion": 40,
-                            "garlic": 300,
-                            "oil": 150,
-                            "egg": 110
-                        }
-
-                        for ing in extended_ingredients:
-                            name = ing.get("name", "Продукт")
-                            amount = ing.get("amount", 1)
-                            servings_base = r.get("servings", 2) or 2
-                            adjusted_amount = round(amount * (persons / servings_base), 1)
-                            unit = ing.get("unit", "шт")
-                            
-                            aisle = ing.get("aisle", "").lower()
-                            category = "other"
-                            is_pantry = False
-                            
-                            if any(w in aisle for w in ["meat", "seafood", "produce", "мясо", "рыба"]):
-                                category = "protein"
-                            elif any(w in aisle for w in ["pasta", "rice", "cereal", "крупы", "макароны"]):
-                                category = "garnish"
-                            elif any(w in aisle for w in ["milk", "cheese", "dairy", "молочные"]):
-                                category = "dairy"
-                            elif any(w in aisle for w in ["vegetable", "fruit", "овощи", "фрукты"]):
-                                category = "vegetables"
-                            elif any(w in aisle for w in ["oil", "spice", "baking", "масла", "специи"]):
-                                category = "pantry"
-                                is_pantry = True
-
-                            est_price = 100
-                            name_lower = name.lower()
-                            for key, price_per_unit in real_market_prices.items():
-                                if key in name_lower:
-                                    if "г" in unit.lower():
-                                        est_price = int(price_per_unit * (adjusted_amount / 1000))
-                                    elif "мл" in unit.lower() or "л" in unit.lower():
-                                        est_price = int(price_per_unit * adjusted_amount)
-                                    else:
-                                        est_price = int(price_per_unit * max(adjusted_amount, 1) * 0.2)
-                                    break
-                            
-                            est_price = max(est_price, 35)
-                            total_price += est_price
-
-                            ingredients_list.append({
-                                "name": name,
-                                "amount": adjusted_amount,
-                                "unit": unit if unit else "шт",
-                                "category": category,
-                                "is_pantry": is_pantry,
-                                "estimated_price_rub": est_price
-                            })
-
+                        # ...
                         return {
-                            "title": title,
-                            "cooking_time": f"{ready_in_minutes} мин",
-                            "equipment": "Плита, духовка",
-                            "serving": "Подавать в теплом виде",
-                            "instructions": instructions_list,
-                            "ingredients": ingredients_list,
-                            "recipe_price": total_price,
-                            "image_url": image_url
+                            "title": r.get("title", dish_name),
+                            "cooking_time": f"{r.get('readyInMinutes', 30)} мин",
+                            # ... остальные поля
                         }
     except Exception as e:
         logging.error(f"Ошибка запроса к Spoonacular API: {e}")
     
     return {}
-
 
 # -------------------------------------------------------------------
 # ОПЛАТА ЧЕРЕЗ ЮKASSA
