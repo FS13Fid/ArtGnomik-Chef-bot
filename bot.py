@@ -59,6 +59,7 @@ class UserPreferences(StatesGroup):
     vegetarian = State()
     calories = State()
     soup_salad = State()
+    budget = State()  # Новое состояние для бюджета
 
 
 def main_keyboard():
@@ -143,14 +144,15 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
 # -------------------------------------------------------------------
 # ЗАПРОСЫ К GROQ
 # -------------------------------------------------------------------
-async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool) -> dict:
-    veg_status = "Только вегетарианские блюда (без мяса, птицы, рыбы)!" if vegetarian else "Разнообразные блюда (мясо, птица, рыба, овощи)."
+async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool, budget: int) -> dict:
+    veg_status = "Только вегетарианские блюда (без мяса, птицы, рыбы)!" if vegetarian else "Разнообразные блюда (мяса, птицы, рыбы, овощей)."
     cal_status = "Каждое блюдо должно быть диетическим и менее калорийным (строго до 600 ккал на порцию)." if low_calories else "Калорийность блюд обычная."
     soup_status = "Разрешается предлагать сытные супы и салаты как основные блюда на ужин." if soup_salad else "Супы и салаты как основное блюдо не предлагать."
+    budget_status = f"Общая оценочная стоимость всех покупаемых продуктов (не базовых из кладовой) должна укладываться примерно в бюджет: {budget} рублей." if budget > 0 else "Бюджет не ограничен."
 
     prompt = f"""
     Ты профессиональный шеф-повар. Сгенерируй {dinners} РАЗНЫХ и УНИКАЛЬНЫХ ужинов для {persons} человек.
-    Предпочтения: {veg_status} {cal_status} {soup_status}
+    Предпочтения: {veg_status} {cal_status} {soup_status} {budget_status}
 
     КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ К ИНСТРУКЦИИ:
     1. Каждое блюдо должно содержать подробную пошаговую инструкцию (6-10 шагов).
@@ -162,14 +164,15 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     4. ДЛЯ КАЖДОГО ИНГРЕДИЕНТА укажи поле `is_pantry` (boolean):
        - Если это базовый продукт, который обычно есть дома (масла: подсолнечное, оливковое, сливочное; мука; соль, черный перец, паприка, сушеные травы и другие специи), то поставь `is_pantry: true`.
        - Для остальных продуктов (мясо, рыба, овощи, сыр, зелень, соусы, паста и т.д.) поставь `is_pantry: false`.
-    5. Для поля `category` используй строго одно из следующих значений:
+    5. Для каждого ингредиента укажи примерную стоимость в рублях (`estimated_price_rub`) с учетом объема на {persons} чел. Сумма `estimated_total_rub` должна быть суммой цен всех продуктов с `is_pantry: false`.
+    6. Для поля `category` используй строго одно из следующих значений:
        - "protein" (для мяса, птицы, рыбы, морепродуктов, фарша, яиц)
        - "garnish" (для круп, макарон, картофеля, макаронных изделий)
        - "vegetables" (для свежих овощей, грибов, томатов в собственном соку и т.д.)
        - "greens" (для зелени, салатов, трав)
        - "dairy" (для сыров, творога, сливок, молока, сметаны)
        - "nuts" (для орехов, кунжута, семечек)
-       - "bakery" (для хлеба, лаваша, муки)
+       - "bakery" (for bread, lavash, flour)
        - "spices" (для приправ, специй, соли, перца)
        - "oil" (для масел: оливковое, подсолнечное)
        - "other" (для прочего)
@@ -207,7 +210,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a professional chef. Always output valid JSON with exact time for each cooking step and correct is_pantry flags."},
+                {"role": "system", "content": "You are a professional chef. Always output valid JSON adhering strictly to the requested budget, step timing, and prices."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7
@@ -222,10 +225,10 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
     prompt = f"""
     Блюдо: "{dish['title']}".
     Замени ингредиент "{old_ingredient}" на подходящий аналог.
-    Обнови подробно список ингредиентов и пошаговую инструкцию.
+    Обнови подробно список ингредиентов (с ценами `estimated_price_rub`) и пошаговую инструкцию.
     
     ТРЕБОВАНИЕ: В пошаговой инструкции на КАЖДОМ шаге указывай точное время в формате "1. [⏱ 5 мин] Текст шага...".
-    Для каждого ингредиента укажи `is_pantry` (true для базовых масел, муки, соли, перца, специй; false для остальных) и правильную категорию (`protein`, `garnish`, `vegetables`, `greens`, `dairy`, `nuts`, `bakery`, `spices`, `oil`, `other`).
+    Для каждого ингредиента укажи `is_pantry` и правильную категорию.
 
     Верни ответ строго в формате JSON с полями: title, cooking_time, equipment, serving, instructions (массив строк), ingredients (массив объектов).
     """
@@ -251,7 +254,7 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
 
     prompt = f"""
     Предложи 3 альтернативных подробных блюда взамен "{old_dish_title}" для {persons} чел. ({veg_status}).
-    В пошаговой инструкции КАЖДЫЙ шаг обязан содержать точное время. Укажи корректно `is_pantry` и `category` для всех ингредиентов.
+    В пошаговой инструкции КАЖДЫЙ шаг обязан содержать точное время. Укажи корректно `is_pantry`, `category` и `estimated_price_rub` для всех ингредиентов.
     
     Верни ответ строго в формате JSON:
     {{
@@ -318,10 +321,10 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
 # -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True)
+    await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True, budget=2500)
     welcome_text = (
         "🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
-        "Я составляю меню с **точным таймингом каждого шага** и делю ингредиенты на покупки и то, что есть дома!"
+        "Я составляю меню с **точным таймингом каждого шага**, делю ингредиенты на покупки и учитываю ваш бюджет!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -432,10 +435,48 @@ async def process_soup_salad(call: types.CallbackQuery, state: FSMContext):
     soups = (call.data == "s_yes")
     await state.update_data(soup_salad=soups)
     
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1500 руб", callback_data="b_1500"),
+            InlineKeyboardButton(text="2500 руб", callback_data="b_2500"),
+            InlineKeyboardButton(text="4000 руб", callback_data="b_4000")
+        ],
+        [
+            InlineKeyboardButton(text="6000 руб", callback_data="b_6000"),
+            InlineKeyboardButton(text="Без ограничений ♾️", callback_data="b_0")
+        ]
+    ])
+    await call.message.edit_text("💰 **Какую сумму вы хотите примерно потратить на закупку продуктов?**\n\nВыберите вариант ниже или введите свою сумму цифрами в чат:", reply_markup=kb, parse_mode="Markdown")
+    await state.set_state(UserPreferences.budget)
+
+
+@dp.callback_query(UserPreferences.budget, F.data.startswith("b_"))
+async def process_budget_callback(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    budget = int(call.data.split("_")[1])
+    await state.update_data(budget=budget)
+    await finish_settings(call.message, state)
+
+
+@dp.message(UserPreferences.budget, F.text)
+async def process_budget_text(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("⚠️ Пожалуйста, введите сумму цифрами (например: `3000`), либо нажмите кнопку выше.", parse_mode="Markdown")
+        return
+    
+    budget = int(text)
+    await state.update_data(budget=budget)
+    await finish_settings(message, state)
+
+
+async def finish_settings(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     veg_status = "не предлагать" if user_data.get("vegetarian") else "предлагать"
     cal_status = "не предлагать" if not user_data.get("low_calories") else "до 600 ккал"
     soup_status = "предлагать" if user_data.get("soup_salad") else "не предлагать"
+    budget_val = user_data.get("budget", 0)
+    budget_str = f"{budget_val} руб." if budget_val > 0 else "Без ограничений"
 
     info_text = (
         f"Учли ваши предпочтения ✏️❤️\n"
@@ -443,10 +484,15 @@ async def process_soup_salad(call: types.CallbackQuery, state: FSMContext):
         f"• Кол-во ужинов: {user_data.get('dinners')}\n"
         f"• Вегетарианские блюда: {veg_status}\n"
         f"• Менее калорийные блюда: {cal_status}\n"
-        f"• Супы/салаты: {soup_status}\n\n"
+        f"• Супы/салаты: {soup_status}\n"
+        f"• Бюджет на закупку: {budget_str}\n\n"
         f"Готовы подобрать для вас блюда 🍝"
     )
-    await call.message.edit_text(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
+    # Если это callback_query.message или обычное сообщение
+    if isinstance(message, types.CallbackQuery):
+        await message.message.edit_text(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
+    else:
+        await message.answer(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "new_selection")
@@ -458,10 +504,11 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     vegetarian = data.get("vegetarian", False)
     low_calories = data.get("low_calories", False)
     soup_salad = data.get("soup_salad", True)
+    budget = data.get("budget", 2500)
 
-    await call.message.answer("👨‍🍳 **Составляю подробные рецепты с таймингом шагов и генерирую фото...**")
+    await call.message.answer("👨‍🍳 **Составляю подробные рецепты с таймингом шагов, ценами и фото в пределах бюджета...**")
 
-    ai_data = await generate_groq_menu(persons, dinners_count, vegetarian, low_calories, soup_salad)
+    ai_data = await generate_groq_menu(persons, dinners_count, vegetarian, low_calories, soup_salad, budget)
     dishes = ai_data.get("dishes", [])
     total_rub = ai_data.get("estimated_total_rub", 0)
 
@@ -471,7 +518,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
     await state.update_data(current_dishes=dishes, estimated_total_rub=total_rub)
 
-    summary_text = "🎉 **Ваше меню готово!**\n\n"
+    summary_text = f"🎉 **Ваше меню готово!**\n💰 Примерная стоимость закупки: **{total_rub} руб.**\n\n"
 
     for idx, dish in enumerate(dishes):
         title = dish['title']
@@ -565,7 +612,13 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
     updated_dish = await replace_ingredient_in_dish(dish, target_ing)
 
     dishes[dish_idx] = updated_dish
-    await state.update_data(current_dishes=dishes)
+    
+    # Пересчитываем общую сумму
+    total_rub = sum(
+        sum(i.get("estimated_price_rub", 0) for i in d.get("ingredients", []) if not i.get("is_pantry", False))
+        for d in dishes
+    )
+    await state.update_data(current_dishes=dishes, estimated_total_rub=total_rub)
 
     res_text = f"✅ **Рецепт обновлен!**\n\n" + format_dish_text(updated_dish, dish_idx, persons)
 
@@ -637,9 +690,13 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
         return
 
     chosen_dish = options[opt_idx]
-    
     dishes[dish_idx] = chosen_dish
-    await state.update_data(current_dishes=dishes)
+    
+    total_rub = sum(
+        sum(i.get("estimated_price_rub", 0) for i in d.get("ingredients", []) if not i.get("is_pantry", False))
+        for d in dishes
+    )
+    await state.update_data(current_dishes=dishes, estimated_total_rub=total_rub)
 
     await call.message.edit_text(f"🎨 Генерирую фото для **«{chosen_dish['title']}»** через YandexART...", parse_mode="Markdown")
 
@@ -739,9 +796,9 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
             res += "\n"
 
     if estimated_total > 0:
-        res += f"💳 Примерная стоимость корзины покупок: {estimated_total} руб."
+        res += f"💳 Примерная стоимость корзины покупок: **{estimated_total} руб.**"
     else:
-        res += "💳 Примерная стоимость корзины покупок: Стоимость не рассчитана, список продуктов можно использовать без оценки."
+        res += "💳 Примерная стоимость корзины покупок: Стоимость не рассчитана."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В главное меню 🏠", callback_data="back_main")]
@@ -757,6 +814,8 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     veg_status = "не предлагать" if user_data.get("vegetarian") else "предлагать"
     cal_status = "не предлагать" if not user_data.get("low_calories") else "до 600 ккал"
     soup_status = "предлагать" if user_data.get("soup_salad") else "не предлагать"
+    budget_val = user_data.get("budget", 0)
+    budget_str = f"{budget_val} руб." if budget_val > 0 else "Без ограничений"
 
     info_text = (
         f"Учли ваши предпочтения ✏️❤️\n"
@@ -764,7 +823,8 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
         f"• Кол-во ужинов: {user_data.get('dinners', 4)}\n"
         f"• Вегетарианские блюда: {veg_status}\n"
         f"• Менее калорийные блюда: {cal_status}\n"
-        f"• Супы/салаты: {soup_status}\n\n"
+        f"• Супы/салаты: {soup_status}\n"
+        f"• Бюджет на закупку: {budget_str}\n\n"
         f"Готовы подобрать для вас блюда 🍝"
     )
     await call.message.answer(info_text, parse_mode="Markdown", reply_markup=main_keyboard())
