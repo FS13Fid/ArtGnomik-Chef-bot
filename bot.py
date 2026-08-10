@@ -186,7 +186,7 @@ async def sub_active_alert(call: types.CallbackQuery):
 # -------------------------------------------------------------------
 async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
     if not YANDEX_CLOUD_API_KEY or not YANDEX_CLOUD_FOLDER:
-        logging.error("❌ YANDEX_CLOUD_API_KEY или YANDEX_CLOUD_FOLDER не заданы!")
+        logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: YANDEX_CLOUD_API_KEY или YANDEX_CLOUD_FOLDER не заданы!")
         return None
 
     clean_name = re.sub(r'[^а-яА-Яa-zA-Z0-9\s]', '', dish_name_ru).strip()
@@ -216,14 +216,19 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
     }
 
     try:
+        logging.info(f"🎨 Отправка запроса на генерацию фото для: {clean_name}")
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=30) as response:
+                resp_text = await response.text()
                 if response.status != 200:
+                    logging.error(f"❌ Ошибка API Яндекса ({response.status}): {resp_text}")
                     return None
-                res_json = await response.json()
+                
+                res_json = json.loads(resp_text)
                 operation_id = res_json.get("id")
 
             if not operation_id:
+                logging.error(f"❌ Яндекс не вернул operation_id. Ответ: {resp_text}")
                 return None
 
             poll_url = f"https://llm.api.cloud.yandex.net/operations/{operation_id}"
@@ -235,10 +240,13 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
                         if poll_json.get("done", False):
                             b64_data = poll_json.get("response", {}).get("image")
                             if b64_data:
+                                logging.info(f"✅ Картинка успешно получена для: {clean_name}")
                                 return base64.b64decode(b64_data)
+                            logging.error(f"❌ Операция завершена, но поле image пустое: {poll_json}")
                             return None
+            logging.error("⏳ Превышено время ожидания (таймаут) генерации картинки в Яндекс Cloud")
     except Exception as e:
-        logging.error(f"❌ Ошибка генерации YandexART: {e}")
+        logging.exception(f"❌ Исключение при запросе к YandexART: {e}")
 
     return None
 
