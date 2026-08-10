@@ -57,6 +57,8 @@ class UserPreferences(StatesGroup):
     persons = State()
     dinners = State()
     vegetarian = State()
+    calories = State()
+    soup_salad = State()
 
 
 def main_keyboard():
@@ -104,7 +106,6 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
     try:
         logging.info(f"🎨 Отправка запроса на генерацию фото для '{clean_name}'...")
         async with aiohttp.ClientSession() as session:
-            # 1. Запуск асинхронной генерации
             async with session.post(url, headers=headers, json=payload, timeout=30) as response:
                 if response.status != 200:
                     err_body = await response.text()
@@ -118,7 +119,6 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
                 logging.error("❌ Не получен operation_id от YandexART")
                 return None
 
-            # 2. Ожидание готовности картинки (polling)
             poll_url = f"https://llm.api.cloud.yandex.net/operations/{operation_id}"
             for _ in range(12):
                 await asyncio.sleep(2)
@@ -141,14 +141,16 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
 
 
 # -------------------------------------------------------------------
-# ЗАПРОСЫ К GROQ (ТОЧНОЕ ВРЕМЯ НА КАЖДОМ ШАГЕ)
+# ЗАПРОСЫ К GROQ
 # -------------------------------------------------------------------
-async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> dict:
+async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool) -> dict:
     veg_status = "Только вегетарианские блюда (без мяса, птицы, рыбы)!" if vegetarian else "Разнообразные блюда (мясо, птица, рыба, овощи)."
+    cal_status = "Каждое блюдо должно быть диетическим и менее калорийным (строго до 600 ккал на порцию)." if low_calories else "Калорийность блюд обычная."
+    soup_status = "Разрешается предлагать сытные супы и салаты как основные блюда на ужин." if soup_salad else "Супы и салаты как основное блюдо не предлагать."
 
     prompt = f"""
     Ты профессиональный шеф-повар. Сгенерируй {dinners} РАЗНЫХ и УНИКАЛЬНЫХ ужинов для {persons} человек.
-    Предпочтения: {veg_status}
+    Предпочтения: {veg_status} {cal_status} {soup_status}
 
     КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ К ИНСТРУКЦИИ:
     1. Каждое блюдо должно содержать подробную пошаговую инструкцию (6-10 шагов).
@@ -304,7 +306,7 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
 # -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.update_data(persons=2, dinners=4, vegetarian=False)
+    await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True)
     welcome_text = (
         "🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
         "Я составляю меню с **точным таймингом каждого шага** (сколько резать, жарить, варить) и генерирую фото блюд!"
@@ -350,7 +352,7 @@ async def start_settings(call: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="1 чел", callback_data="p_1"), InlineKeyboardButton(text="2 чел", callback_data="p_2"), InlineKeyboardButton(text="4 чел", callback_data="p_4")]
     ])
-    await call.message.edit_text("Укажите количество человек:", reply_markup=kb)
+    await call.message.edit_text("👤 **Кол-во человек:**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.persons)
 
 
@@ -361,7 +363,7 @@ async def process_persons(call: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="3 ужина", callback_data="d_3"), InlineKeyboardButton(text="4 ужина", callback_data="d_4"), InlineKeyboardButton(text="5 ужинов", callback_data="d_5")]
     ])
-    await call.message.edit_text("Сколько ужинов планируем?", reply_markup=kb)
+    await call.message.edit_text("🍽 **Кол-во ужинов:**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.dinners)
 
 
@@ -372,7 +374,7 @@ async def process_dinners(call: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Да 🌱", callback_data="v_yes"), InlineKeyboardButton(text="Нет 🥩", callback_data="v_no")]
     ])
-    await call.message.edit_text("Только вегетарианское меню?", reply_markup=kb)
+    await call.message.edit_text("🥗 **Вы вегетарианец?**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.vegetarian)
 
 
@@ -380,28 +382,58 @@ async def process_dinners(call: types.CallbackQuery, state: FSMContext):
 async def process_veg(call: types.CallbackQuery, state: FSMContext):
     is_veg = (call.data == "v_yes")
     await state.update_data(vegetarian=is_veg)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да 🥗", callback_data="c_yes"), InlineKeyboardButton(text="Без разницы 🍝", callback_data="c_any")]
+    ])
+    await call.message.edit_text("Сделать меню менее калорийным (до 600 ккал на порцию)?", reply_markup=kb, parse_mode="Markdown")
+    await state.set_state(UserPreferences.calories)
+
+
+@dp.callback_query(UserPreferences.calories, F.data.startswith("c_"))
+async def process_calories(call: types.CallbackQuery, state: FSMContext):
+    low_cal = (call.data == "c_yes")
+    await state.update_data(low_calories=low_cal)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да 🍲", callback_data="s_yes"), InlineKeyboardButton(text="Нет 🍽", callback_data="s_no")]
+    ])
+    await call.message.edit_text("Предлагать ли вам на ужин сытные салаты и супы как основное блюдо?", reply_markup=kb, parse_mode="Markdown")
+    await state.set_state(UserPreferences.soup_salad)
+
+
+@dp.callback_query(UserPreferences.soup_salad, F.data.startswith("s_"))
+async def process_soup_salad(call: types.CallbackQuery, state: FSMContext):
+    soups = (call.data == "s_yes")
+    await state.update_data(soup_salad=soups)
+    
     user_data = await state.get_data()
-    veg_status = "да 🌱" if user_data.get("vegetarian") else "нет 🥩"
+    veg_status = "не предлагать" if user_data.get("vegetarian") else "предлагать"
+    cal_status = "не предлагать" if not user_data.get("low_calories") else "до 600 ккал"
+    soup_status = "предлагать" if user_data.get("soup_salad") else "не предлагать"
 
     info_text = (
-        f"Настройки сохранены! ⚙️\n"
-        f"• Человек: {user_data.get('persons')}\n"
-        f"• Ужинов: {user_data.get('dinners')}\n"
-        f"• Вегетарианское: {veg_status}"
+        f"Учли ваши предпочтения ✏️❤️\n"
+        f"• Кол-во человек: {user_data.get('persons')}\n"
+        f"• Кол-во ужинов: {user_data.get('dinners')}\n"
+        f"• Вегетарианские блюда: {veg_status}\n"
+        f"• Менее калорийные блюда: {cal_status}\n"
+        f"• Супы/салаты: {soup_status}\n\n"
+        f"Готовы подобрать для вас блюда 🍝"
     )
-    await call.message.edit_text(info_text, reply_markup=main_keyboard())
+    await call.message.edit_text(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "new_selection")
 async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    persons = data.get("persons", 2)
+    persons = data.get("persons", 1)
     dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
+    low_calories = data.get("low_calories", False)
+    soup_salad = data.get("soup_salad", True)
 
     await call.message.answer("👨‍🍳 **Составляю подробные рецепты с таймингом шагов и генерирую фото...**")
 
-    ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
+    ai_data = await generate_groq_menu(persons, dinners_count, vegetarian, low_calories, soup_salad)
     dishes = ai_data.get("dishes", [])
 
     if not dishes:
@@ -487,7 +519,7 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
 
     data = await state.get_data()
     dishes = data.get("current_dishes", [])
-    persons = data.get("persons", 2)
+    persons = data.get("persons", 1)
 
     if dish_idx >= len(dishes):
         await call.answer("Ошибка поиска блюда")
@@ -519,7 +551,7 @@ async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
     dish_idx = int(call.data.split("_")[-1])
     data = await state.get_data()
     dishes = data.get("current_dishes", [])
-    persons = data.get("persons", 2)
+    persons = data.get("persons", 1)
     vegetarian = data.get("vegetarian", False)
 
     if dish_idx >= len(dishes):
@@ -564,7 +596,7 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
     dish_idx = data.get("target_dish_idx")
     dishes = data.get("current_dishes", [])
     options = data.get("temp_replacement_options", [])
-    persons = data.get("persons", 2)
+    persons = data.get("persons", 1)
 
     if dish_idx is None or opt_idx >= len(options) or dish_idx >= len(dishes):
         await call.answer("Ошибка при замене блюда")
@@ -602,7 +634,7 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    persons = data.get("persons", 2)
+    persons = data.get("persons", 1)
     dishes = data.get("current_dishes", [])
 
     if not dishes:
@@ -664,15 +696,20 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "back_main")
 async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
-    veg_status = "да 🌱" if user_data.get("vegetarian") else "нет 🥩"
+    veg_status = "не предлагать" if user_data.get("vegetarian") else "предлагать"
+    cal_status = "не предлагать" if not user_data.get("low_calories") else "до 600 ккал"
+    soup_status = "предлагать" if user_data.get("soup_salad") else "не предлагать"
 
     info_text = (
-        f"Текущие параметры ⚙️\n"
-        f"• Человек: {user_data.get('persons', 2)}\n"
-        f"• Ужинов: {user_data.get('dinners', 4)}\n"
-        f"• Вегетарианское: {veg_status}"
+        f"Учли ваши предпочтения ✏️❤️\n"
+        f"• Кол-во человек: {user_data.get('persons', 1)}\n"
+        f"• Кол-во ужинов: {user_data.get('dinners', 4)}\n"
+        f"• Вегетарианские блюда: {veg_status}\n"
+        f"• Менее калорийные блюда: {cal_status}\n"
+        f"• Супы/салаты: {soup_status}\n\n"
+        f"Готовы подобрать для вас блюда 🍝"
     )
-    await call.message.answer(info_text, reply_markup=main_keyboard())
+    await call.message.answer(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
 
 
 async def handle_ping(request):
