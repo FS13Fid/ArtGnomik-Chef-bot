@@ -19,19 +19,18 @@ from openai import AsyncOpenAI
 # -------------------------------------------------------------------
 # НАСТРОЙКИ И КЛЮЧИ (Получаем из Environment Variables Render)
 # -------------------------------------------------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_TELEGRAM_TOKEN_ЗДЕСЬ")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "ВАШ_GROQ_API_KEY_ЗДЕСЬ")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Инициализируем клиент OpenAI с адресом сервера Groq
+# Клиент для генерации текста через бесплатную Groq API
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 
-# Выбираем мощную модель с поддержкой JSON от Groq
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
@@ -44,22 +43,25 @@ class UserPreferences(StatesGroup):
 
 def main_keyboard():
     kb = [
-        [InlineKeyboardButton(text="Новая подборка ✨ (Groq AI)", callback_data="new_selection")],
+        [InlineKeyboardButton(text="Новая подборка ✨ (Groq + Pollinations)", callback_data="new_selection")],
         [InlineKeyboardButton(text="Настроить фильтрацию ⚙️", callback_data="settings")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Бесплатный генератор картинки блюда через Pollinations.ai
-def generate_image_url(dish_name_en: str) -> str:
+# Бесплатная генерация ссылки на фото блюда через Pollinations.ai
+def generate_pollinations_image_url(dish_name_en: str) -> str:
+    # Очищаем название от лишних символов
     clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en)
-    prompt = f"professional food photo of {clean_name}, appetizing, delicious, studio lighting, 8k"
+    # Составляем детальный промпт для красивого фуд-фото
+    prompt = f"professional food photo of {clean_name}, high quality, highly detailed, appetizing, studio lighting, 8k"
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 999999)
+    # nologo=true убирает водяной знак
     return f"https://pollinations.ai/p/{encoded_prompt}?width=800&height=600&seed={seed}&nologo=true"
 
 
-# Быстрая генерация меню через Groq API
+# Быстрая генерация меню через Groq
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Любые блюда (мясо, птица, рыба)."
 
@@ -85,7 +87,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
-            response_format={"type": "json_object"},  # Принудительный JSON режим
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": "You are a helpful culinary assistant that responds only in JSON format."},
                 {"role": "user", "content": prompt}
@@ -94,12 +96,10 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
         )
 
         content = response.choices[0].message.content
-        data = json.loads(content)
-        return data
+        return json.loads(content)
 
     except Exception as e:
         logging.error(f"Groq API Error: {e}")
-        # Запасное меню на случай непредвиденных сбоев
         return {
             "dishes": [{
                 "title": "Быстрые спагетти с сыром 🧀",
@@ -117,9 +117,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
     welcome_text = (
         "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я работаю на сверхавтоматической нейросети **Groq**, чтобы мгновенно "
-        "составлять уникальные меню и подбирать аппетитные фото!\n"
-        "Каждая генерация — полностью новая!"
+        "Я составляю меню с помощью **Groq AI** и создаю яркие аппетитные фото с **Pollinations.ai**!\n"
+        "Всё работает бесплатно и без ограничений!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -182,7 +181,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 3)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("⚡ Groq составляет меню и рисует картинки...")
+    await call.message.answer("⚡ Составляю рецепты и генерирую фото через Pollinations...")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -190,12 +189,14 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(current_dishes=dishes)
 
     for idx, dish in enumerate(dishes, 1):
-        image_url = generate_image_url(dish.get("title_en", "delicious food"))
+        # Генерируем ссылку Pollinations
+        image_url = generate_pollinations_image_url(dish.get("title_en", "delicious food"))
         caption = f"**День {idx}: {dish['title']}**\n\n📖 **Рецепт:**\n{dish['recipe']}"
         
         try:
             await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown")
-        except Exception:
+        except Exception as e:
+            logging.error(f"Error sending photo: {e}")
             await call.message.answer(caption, parse_mode="Markdown")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -257,9 +258,8 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer(info_text, reply_markup=main_keyboard())
 
 
-# Сервер для порта Render
 async def handle_ping(request):
-    return web.Response(text="Art Gnomik is running on Groq!")
+    return web.Response(text="Art Gnomik is running with Pollinations!")
 
 
 async def start_web_server():
