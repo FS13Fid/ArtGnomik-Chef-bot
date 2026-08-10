@@ -19,8 +19,8 @@ from openai import AsyncOpenAI
 # -------------------------------------------------------------------
 # НАСТРОЙКИ И КЛЮЧИ (Получаем из Environment Variables Render)
 # -------------------------------------------------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_TELEGRAM_TOKEN_ЗДЕСЬ")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "ВАШ_GROQ_API_KEY_ЗДЕСЬ")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
