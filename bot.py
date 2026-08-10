@@ -41,9 +41,8 @@ YANDEX_CLOUD_FOLDER = os.environ.get(
 
 YANDEX_CLOUD_API_KEY = os.environ.get(
     "YANDEX_CLOUD_API_KEY", 
-    "123"
+    "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ"
 ).strip()
-#   AQVNwj_6nJEIkW5YolgbZDXjgHueyVJStGtpcMX-   апи клауд яндекс
 
 # НАСТРОЙКИ ЮKASSA
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "YOUR_SHOP_ID").strip()
@@ -58,10 +57,8 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# База данных статусов пользователей в памяти
 USERS_DB: Dict[int, dict] = {}
 
-# Клиент Groq для генерации текстового меню
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
@@ -96,23 +93,23 @@ def main_keyboard(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Вспомогательная функция проверки подписки
 def check_access(user_id: int) -> bool:
     return USERS_DB.get(user_id, {}).get("is_full", False)
 
 
 # -------------------------------------------------------------------
-# ВЕБ-ПОИСК РЕЦЕПТОВ ЧЕРЕЗ DUCKDUCKGO
+# ВЕБ-ПОИСК РЕЦЕПТА С КОНКРЕТНОГО САЙТА (russianfood.com)
 # -------------------------------------------------------------------
-async def search_recipe_from_web(dish_name: str) -> str:
+async def search_single_recipe_source(dish_name: str) -> str:
+    """Ищет рецепт строго на сайте russianfood.com и берет текст из первого найденного результата."""
     try:
-        query = f"классический рецепт {dish_name} пошагово"
+        query = f"site:russianfood.com классический рецепт {dish_name}"
         with DDGS() as ddgs:
-            results = [r.get('body', '') for r in ddgs.text(query, max_results=2)]
+            results = [r.get('body', '') for r in ddgs.text(query, max_results=1)]
         if results:
-            return "\n---\n".join(results)
+            return results[0]
     except Exception as e:
-        logging.error(f"Ошибка веб-поиска рецепта: {e}")
+        logging.error(f"Ошибка веб-поиска рецепта на russianfood.com: {e}")
     return ""
 
 
@@ -219,8 +216,6 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
             base_url="https://ai.api.cloud.yandex.net/v1",
             project=YANDEX_CLOUD_FOLDER
         )
-
-        logging.info(f"🎨 Отправка запроса на генерацию фото (OpenAI API) для: {clean_name}")
         
         img = await yandex_openai_client.images.generate(
             model=f"art://{YANDEX_CLOUD_FOLDER}/aliceai-image-art-3.0/latest",
@@ -229,19 +224,15 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
         )
 
         if img.data and img.data[0].b64_json:
-            logging.info(f"✅ Картинка успешно получена для: {clean_name}")
             return base64.b64decode(img.data[0].b64_json)
-        
-        logging.error(f"❌ Ответ от Яндекс API пришел пустым для: {clean_name}")
         return None
-
     except Exception as e:
-        logging.exception(f"❌ Исключение при запросе к YandexART через OpenAI SDK: {e}")
+        logging.exception(f"❌ Исключение при запросе к YandexART: {e}")
         return None
 
 
 # -------------------------------------------------------------------
-# ЗАПРОСЫ К GROQ С ВЕБ-ПОИСКОМ
+# ЗАПРОСЫ К GROQ С ОДНИМ ИСТОЧНИКОМ И СТРОГИМИ ТАЙМИНГАМИ
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool, budget: int) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Разнообразные блюда."
@@ -249,7 +240,6 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     soup_status = "Разрешены супы и салаты." if soup_salad else ""
     budget_status = f"Бюджет: {budget} руб." if budget > 0 else ""
 
-    # Сначала сгенерируем список названий блюд через общую логику или поиск
     prompt_list = f"""
     Ты шеф-повар. Предложи список из {dinners} РАЗНЫХ названий вкусных ужинов для {persons} человек.
     {veg_status} {cal_status} {soup_status} {budget_status}
@@ -270,16 +260,20 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     total_rub = 0
 
     for name in dish_names:
-        # Ищем рецепт в интернете для каждого блюда
-        web_info = await search_recipe_from_web(name)
+        # Получаем данные строго из russianfood.com
+        single_source_text = await search_single_recipe_source(name)
 
         prompt_dish = f"""
-        Ты шеф-повар. Используй информацию из реальных кулинарных сайтов ниже (если она есть), чтобы составить точный, подробный и правильный рецепт для блюда "{name}" на {persons} человек.
-        Информация из интернета:
-        {web_info}
+        Ты шеф-повар. Оформи рецепт для блюда "{name}" на {persons} человек, используя **исключительно** приведенный ниже текст с сайта russianfood.com.
+        
+        Текст с russianfood.com:
+        {single_source_text}
 
-        Важно: Инструкции по приготовлению оформляй подробно, разбивая на нумерованные шаги, обязательно указывая время в формате [⏱ X мин] для каждого шага (например: "1. [⏱ 7 мин] Вскипятите воду...").
-
+        ЖЕСТКИЕ ПРАВИЛА:
+        1. НЕ СМЕШИВАЙ данные из других источников. Пользуйся только текстом выше.
+        2. Поле "cooking_time" бери СТРОГО из этого текста.
+        3. Внутри поля "instructions" каждый шаг ОБЯЗАН содержать время в формате [⏱ X мин], причем бери это время строго из текста источника (если оно там указано).
+        
         Верни ответ СТРОГО в формате JSON:
         {{
           "title": "{name}",
@@ -299,25 +293,24 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
           ]
         }}
         Категории ингредиентов (поле category):
-        - "protein" (🥩 Белок: мясо, рыба, фарш, птица)
-        - "garnish" (🍚 Гарнир: крупы, макароны, картофель)
-        - "dairy" (🥛 Молочка: молоко, сметана, сыр, творог)
-        - "vegetables" (🥦 Овощи и зелень: лук, морковь, томаты, зелень)
-        - "pantry" (🧈 Масло и приправы: растительное масло, соль, перец)
-        - "other" (📦 Прочее: соусы, вода, лимонный сок и т.д.)
-        Поле is_pantry ставь true для масел, соли, специй и базовых приправ, которые обычно есть дома, и false для остальных.
+        - "protein" (🥩 Белок)
+        - "garnish" (🍚 Гарнир)
+        - "dairy" (🥛 Молочка)
+        - "vegetables" (🥦 Овощи и зелень)
+        - "pantry" (🧈 Масло и приправы)
+        - "other" (📦 Прочее)
+        Поле is_pantry ставь true для масел, соли, специй.
         """
         try:
             resp = await groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt_dish}],
-                temperature=0.7
+                temperature=0.2  # Минимальная температура для строгого следования источнику
             )
             dish_data = json.loads(resp.choices[0].message.content)
             dishes.append(dish_data)
             
-            # Считаем примерную сумму
             for ing in dish_data.get("ingredients", []):
                 total_rub += ing.get("estimated_price_rub", 100)
         except Exception as e:
@@ -330,13 +323,13 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
 
 
 async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
-    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients.'
+    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог, сохранив оригинальные шаги и тайминги. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients.'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+            temperature=0.3
         )
         return json.loads(response.choices[0].message.content)
     except Exception:
@@ -344,14 +337,14 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
 
 
 async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
-    web_info = await search_recipe_from_web(old_dish_title)
-    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел. Используй контекст: {web_info}. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты).'
+    single_source_text = await search_single_recipe_source(old_dish_title)
+    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел., опираясь на контекст: {single_source_text}. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты).'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.8
+            temperature=0.5
         )
         return json.loads(response.choices[0].message.content).get("options", [])
     except Exception:
@@ -516,7 +509,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("⚠️ **Требуется подписка**\n\nДля генерации персонального меню оформите подписку кнопкой ниже.", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
-    await call.answer("Ищу рецепты в интернете и генерирую меню...")
+    await call.answer("Ищу рецепты с russianfood.com...")
     data = await state.get_data()
     
     ai_data = await generate_groq_menu(
@@ -661,7 +654,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     persons_count = data.get("persons", 1)
     total_rub = data.get("estimated_total_rub", 0)
 
-    # Категории для магазина
     shop_categories = {
         "protein": {"title": "🥩 Белок:", "items": {}},
         "garnish": {"title": "🍚 Гарнир:", "items": {}},
@@ -670,7 +662,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
         "other": {"title": "📦 Прочее:", "items": {}}
     }
 
-    # Отдельная секция «Скорее всего есть у вас дома»
     pantry_categories = {
         "oil": {"title": "🧈 Масло:", "items": {}},
         "spices": {"title": "🧂 Приправа:", "items": {}},
@@ -709,7 +700,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
                 res += f"• {name} — {info['amount']} {info['unit']}\n"
             res += "\n"
 
-    # Добавляем блок «Скорее всего есть у вас дома» если там есть элементы
     has_pantry_items = any(cat["items"] for cat in pantry_categories.values())
     if has_pantry_items:
         res += "🏠 Скорее всего есть у вас дома:\n\n"
