@@ -361,6 +361,7 @@ async def cmd_menu(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "settings")
 async def start_settings(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="1 чел", callback_data="p_1"),
@@ -379,6 +380,7 @@ async def start_settings(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(UserPreferences.persons, F.data.startswith("p_"))
 async def process_persons(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     persons = int(call.data.split("_")[1])
     await state.update_data(persons=persons)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -390,6 +392,7 @@ async def process_persons(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(UserPreferences.dinners, F.data.startswith("d_"))
 async def process_dinners(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     dinners = int(call.data.split("_")[1])
     await state.update_data(dinners=dinners)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -401,6 +404,7 @@ async def process_dinners(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(UserPreferences.vegetarian, F.data.startswith("v_"))
 async def process_veg(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     is_veg = (call.data == "v_yes")
     await state.update_data(vegetarian=is_veg)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -412,6 +416,7 @@ async def process_veg(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(UserPreferences.calories, F.data.startswith("c_"))
 async def process_calories(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     low_cal = (call.data == "c_yes")
     await state.update_data(low_calories=low_cal)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -423,6 +428,7 @@ async def process_calories(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(UserPreferences.soup_salad, F.data.startswith("s_"))
 async def process_soup_salad(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     soups = (call.data == "s_yes")
     await state.update_data(soup_salad=soups)
     
@@ -445,6 +451,7 @@ async def process_soup_salad(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "new_selection")
 async def generate_selection(call: types.CallbackQuery, state: FSMContext):
+    await call.answer("Генерирую меню...")
     data = await state.get_data()
     persons = data.get("persons", 1)
     dinners_count = data.get("dinners", 4)
@@ -501,12 +508,13 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 # -------------------------------------------------------------------
 @dp.callback_query(F.data.startswith("replace_ing_select_"))
 async def select_ingredient_to_replace(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     dish_idx = int(call.data.split("_")[-1])
     data = await state.get_data()
     dishes = data.get("current_dishes", [])
 
-    if dish_idx >= len(dishes):
-        await call.answer("Блюдо не найдено")
+    if not dishes or dish_idx >= len(dishes):
+        await call.message.answer("⚠️ Меню устарело или не найдено. Нажмите «Новая подборка ✨» в главном меню.", reply_markup=main_keyboard())
         return
 
     dish = dishes[dish_idx]
@@ -530,11 +538,13 @@ async def select_ingredient_to_replace(call: types.CallbackQuery, state: FSMCont
 
 @dp.callback_query(F.data == "cancel_replace")
 async def cancel_replace(call: types.CallbackQuery):
+    await call.answer()
     await call.message.delete()
 
 
 @dp.callback_query(F.data.startswith("do_replace_"))
 async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMContext):
+    await call.answer("Заменяю ингредиент...")
     parts = call.data.split("_")
     dish_idx = int(parts[2])
     ing_idx = int(parts[3])
@@ -543,8 +553,8 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
     dishes = data.get("current_dishes", [])
     persons = data.get("persons", 1)
 
-    if dish_idx >= len(dishes):
-        await call.answer("Ошибка поиска блюда")
+    if not dishes or dish_idx >= len(dishes):
+        await call.message.answer("⚠️ Меню устарело. Нажмите «Новая подборка ✨»", reply_markup=main_keyboard())
         return
 
     dish = dishes[dish_idx]
@@ -570,14 +580,15 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
 
 @dp.callback_query(F.data.startswith("replace_dish_options_"))
 async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     dish_idx = int(call.data.split("_")[-1])
     data = await state.get_data()
     dishes = data.get("current_dishes", [])
     persons = data.get("persons", 1)
     vegetarian = data.get("vegetarian", False)
 
-    if dish_idx >= len(dishes):
-        await call.answer("Блюдо не найдено")
+    if not dishes or dish_idx >= len(dishes):
+        await call.message.answer("⚠️ Меню устарело или не найдено. Нажмите «Новая подборка ✨»", reply_markup=main_keyboard())
         return
 
     old_dish = dishes[dish_idx]
@@ -612,6 +623,7 @@ async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("apply_dish_swap_"))
 async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
+    await call.answer("Применяю замену...")
     opt_idx = int(call.data.split("_")[-1])
     data = await state.get_data()
 
@@ -620,8 +632,8 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
     options = data.get("temp_replacement_options", [])
     persons = data.get("persons", 1)
 
-    if dish_idx is None or opt_idx >= len(options) or dish_idx >= len(dishes):
-        await call.answer("Ошибка при замене блюда")
+    if dish_idx is None or not dishes or dish_idx >= len(dishes) or opt_idx >= len(options):
+        await call.message.answer("⚠️ Ошибка замены. Пожалуйста, начните заново.", reply_markup=main_keyboard())
         return
 
     chosen_dish = options[opt_idx]
@@ -655,15 +667,17 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
 # -------------------------------------------------------------------
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     data = await state.get_data()
     persons = data.get("persons", 1)
-    dinners_count = len(data.get("current_dishes", []))
     dishes = data.get("current_dishes", [])
     estimated_total = data.get("estimated_total_rub", 0)
 
     if not dishes:
-        await call.answer("Сначала сгенерируйте подборку!")
+        await call.message.answer("⚠️ Сначала сгенерируйте подборку через меню!", reply_markup=main_keyboard())
         return
+
+    dinners_count = len(dishes)
 
     shop_categories = {
         "protein": {"title": "🥩 Белок:", "items": {}},
@@ -738,6 +752,7 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "back_main")
 async def back_to_main(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
     user_data = await state.get_data()
     veg_status = "не предлагать" if user_data.get("vegetarian") else "предлагать"
     cal_status = "не предлагать" if not user_data.get("low_calories") else "до 600 ккал"
@@ -752,7 +767,7 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
         f"• Супы/салаты: {soup_status}\n\n"
         f"Готовы подобрать для вас блюда 🍝"
     )
-    await call.message.answer(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
+    await call.message.answer(info_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
 
 async def handle_ping(request):
