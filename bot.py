@@ -40,7 +40,7 @@ YANDEX_CLOUD_FOLDER = os.environ.get(
 
 YANDEX_CLOUD_API_KEY = os.environ.get(
     "YANDEX_CLOUD_API_KEY", 
-    "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ"
+    "AQVNwj_6nJEIkW5YolgbZDXjgHueyVJStGtpcMX-"
 ).strip()
 
 # НАСТРОЙКИ ЮKASSA
