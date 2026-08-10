@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import random
 from typing import Dict, List
 
@@ -9,13 +10,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiohttp import web
 
 # -------------------------------------------------------------------
 # ВСТАВЬТЕ СЮДА ВАШ ТОКЕН ОТ BOTFATHER
 # -------------------------------------------------------------------
 BOT_TOKEN = "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4"
 
-# База данных рецептов с ингредиентами из расчета на 1 порцию
+# База данных рецептов
 RECIPES_DB = [
     {
         "id": 1,
@@ -55,7 +57,7 @@ RECIPES_DB = [
     },
     {
         "id": 4,
-        "title": "Стеки из лосося с рисом 🐟",
+        "title": "Стейк из лосося с рисом 🐟",
         "vegetarian": False,
         "recipe": "1. Отварите рис.\n2. Обжарьте стейк лосося по 3-4 минуты с каждой стороны.\n3. Подавайте с лимоном.",
         "ingredients": {
@@ -80,14 +82,14 @@ RECIPES_DB = [
 ]
 
 
-# Состояния FSM
+# FSM Состояния
 class UserPreferences(StatesGroup):
     persons = State()
     dinners = State()
     vegetarian = State()
 
 
-# Главная клавиатура (как на скриншоте)
+# Главная клавиатура
 def main_keyboard():
     kb = [
         [InlineKeyboardButton(text="Новая подборка ✨", callback_data="new_selection")],
@@ -96,12 +98,9 @@ def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-
-# Приветственный текст
 WELCOME_TEXT = (
     "Привет 🍝\n\n"
     "Этот бот поможет вам решить три задачи сразу:\n\n"
@@ -120,10 +119,8 @@ HOW_IT_WORKS_TEXT = (
 )
 
 
-# Старт бота
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    # Установка значений по умолчанию
     await state.update_data(persons=1, dinners=3, vegetarian=False)
 
     await message.answer(WELCOME_TEXT)
@@ -141,7 +138,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(info_text, reply_markup=main_keyboard())
 
 
-# Настройка фильтрации
 @dp.callback_query(F.data == "settings")
 async def start_settings(call: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -193,7 +189,6 @@ async def process_veg(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text(info_text, reply_markup=main_keyboard())
 
 
-# Формирование новой подборки
 @dp.callback_query(F.data == "new_selection")
 async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -201,7 +196,6 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 3)
     is_veg = data.get("vegetarian", False)
 
-    # Фильтрация базы
     available_recipes = [r for r in RECIPES_DB if not is_veg or r["vegetarian"]]
 
     if len(available_recipes) < dinners_count:
@@ -211,7 +205,6 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
     await state.update_data(current_selection=[r["id"] for r in selected_recipes])
 
-    # Вывод меню
     response = f"✨ **Ваша подборка ужинов на {len(selected_recipes)} дней ({persons} чел.):**\n\n"
     for idx, recipe in enumerate(selected_recipes, 1):
         response += f"**{idx}. {recipe['title']}**\n{recipe['recipe']}\n\n"
@@ -224,7 +217,6 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer(response, parse_mode="Markdown", reply_markup=kb)
 
 
-# Генерация списка покупок
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -235,8 +227,7 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
         await call.answer("Сначала сгенерируйте подборку!")
         return
 
-    # Подсчет ингредиентов
-    shopping_cart: Dict[str, List[float, str]] = {}
+    shopping_cart: Dict[str, List] = {}
 
     for r_id in selected_ids:
         recipe = next((r for r in RECIPES_DB if r["id"] == r_id), None)
@@ -248,10 +239,8 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
                 else:
                     shopping_cart[ing] = [total_amount, unit]
 
-    # Форматирование списка
     result_text = f"🛒 **Список продуктов в магазин ({persons} чел.):**\n\n"
     for ing, (amount, unit) in shopping_cart.items():
-        # Округление красивых чисел
         amount_str = f"{amount:.1f}".rstrip('0').rstrip('.') if isinstance(amount, float) else str(amount)
         result_text += f"• {ing}: **{amount_str} {unit}**\n"
 
@@ -277,30 +266,28 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer(info_text, reply_markup=main_keyboard())
 
 
-# Запуск
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
+# Функция заглушки для порта Render
+async def handle_ping(request):
+    return web.Response(text="Bot is live!")
 
-if __name__ == "__main__":
-    asyncio.run(main())
-    import os
-from aiohttp import web
-
-# Простой веб-сервер для Render Free Tier
-async def handle(request):
-    return web.Response(text="Bot is running!")
 
 async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", handle)
+    app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# Добавьте вызов start_web_server() в вашу функцию main():
-# async def main():
-#     await start_web_server()  <-- добавить эту строчку
-#     await dp.start_polling(bot)
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    # Запускаем фоновый веб-сервер для удержания Render Free Tier
+    await start_web_server()
+    # Запускаем самого бота
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
