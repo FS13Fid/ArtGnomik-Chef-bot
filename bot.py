@@ -755,3 +755,30 @@ async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
+    
+# -------------------------------------------------------------------
+# ЗАПУСК БОТА И WEB-СЕРВЕРА (ЧТОБЫ RENDER НЕ ВЫДАВАЛ ОШИБКУ ПОРТА)
+# -------------------------------------------------------------------
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render автоматически передает порт через переменную окружения PORT
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Веб-сервер запущен на порту {port}")
+
+async def main():
+    # Запускаем веб-сервер в фоне для Render
+    await web_server()
+    # Запускаем сам телеграм-бот
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
