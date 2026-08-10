@@ -12,7 +12,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile
 from aiohttp import web
 from openai import AsyncOpenAI
 
@@ -20,17 +20,11 @@ from openai import AsyncOpenAI
 from yookassa import Configuration, Payment
 
 # -------------------------------------------------------------------
-# НАСТРОЙКИ И КЛЮЧИ
+# НАСТРОЙКИ И КЛЮЧИ (БЕЗОПАСНОЕ ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ)
 # -------------------------------------------------------------------
-BOT_TOKEN = os.environ.get(
-    "BOT_TOKEN",
-    ""
-).strip()
-
-GROQ_API_KEY = os.environ.get(
-    "GROQ_API_KEY",
-    ""
-).strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+HUGGINGFACE_TOKEN = os.environ.get("HUGGINGFACE_TOKEN", "").strip()
 
 # ОСНОВНАЯ И РЕЗЕРВНАЯ МОДЕЛИ (Groq)
 groq_client = AsyncOpenAI(
@@ -47,8 +41,8 @@ reserve_client = AsyncOpenAI(
 RESERVE_MODEL = "llama-3.1-8b-instant"
 
 # НАСТРОЙКИ ЮKASSA
-YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "YOUR_SHOP_ID").strip()
-YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "YOUR_SECRET_KEY").strip()
+YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "").strip()
+YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "").strip()
 
 Configuration.account_id = YOOKASSA_SHOP_ID
 Configuration.secret_key = YOOKASSA_SECRET_KEY
@@ -94,26 +88,30 @@ def check_access(user_id: int) -> bool:
 
 
 # -------------------------------------------------------------------
-# ПОИСК КАРТИНОК ЧЕРЕЗ ИНТЕРНЕТ (DUCKDUCKGO IMAGES)
+# ГЕНЕРАЦИЯ КАРТИНОК ЧЕРЕЗ БЕСПЛАТНУЮ НЕЙРОСЕТЬ (STABLE DIFFUSION XL)
 # -------------------------------------------------------------------
 async def fetch_dish_image(dish_name: str) -> str:
-    """Ищет картинку блюда через открытый поиск изображений DuckDuckGo."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            # 1. Получаем токен для поиска
-            url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(dish_name + ' рецепт блюдо фото')}"
-            async with session.get(url) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    # Простой парсинг первой попавшейся ссылки на картинку из выдачи или подбор качественной стоковой картинки-заглушки
-                    # Если поиск не дал прямой картинки, используем универсальную аппетитную фото-заглушку по ключевым словам
-    except Exception as e:
-        logging.error(f"Ошибка поиска картинки: {e}")
+    """Генерирует уникальную картинку блюда через бесплатную модель Stable Diffusion на Hugging Face."""
+    API_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+    HEADERS = {"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"}
+    
+    prompt = f"Professional food photography of {dish_name}, high resolution, delicious, restaurant presentation, 8k"
 
-    # Надежная резервная база аппетитных картинок по категориям блюд, чтобы не было путаницы
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, headers=HEADERS, json={"inputs": prompt}) as response:
+                if response.status == 200:
+                    image_bytes = await response.read()
+                    filename = f"dish_{hash(dish_name)}.jpg"
+                    with open(filename, "wb") as f:
+                        f.write(image_bytes)
+                    return filename
+                else:
+                    logging.warning(f"Ошибка генерации картинки через HF (статус {response.status}), используем резервную ссылку.")
+    except Exception as e:
+        logging.error(f"Ошибка запроса к Hugging Face: {e}")
+
+    # Надежная резервная база на случай задержки или ошибки API
     name_lower = dish_name.lower()
     if "суп" in name_lower or "борщ" in name_lower or "бульон" in name_lower or "щи" in name_lower:
         return "https://images.unsplash.com/photo-1547592166-23ac45744acd?w=800&auto=format&fit=crop&q=80"
@@ -128,7 +126,6 @@ async def fetch_dish_image(dish_name: str) -> str:
     elif "рыб" in name_lower or "лосось" in name_lower or "треск" in name_lower:
         return "https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?w=800&auto=format&fit=crop&q=80"
     
-    # Универсальная красивая еда по умолчанию
     return "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&auto=format&fit=crop&q=80"
 
 
@@ -515,7 +512,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
-    await call.answer("Генерирую персональное меню и подбираю фотографии...")
+    await call.answer("Генерирую персональное меню и рисую уникальные фото через нейросеть...")
     data = await state.get_data()
 
     ai_data = await generate_groq_menu(
@@ -542,8 +539,8 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
         summary_text += f"**{idx + 1}.** {title}\n"
         caption = format_dish_text(dish, idx, data.get("persons", 1))
 
-        # Подбираем точное изображение по типу блюда
-        image_url = await fetch_dish_image(title)
+        # Генерируем картинку через нейросеть (или получаем заглушку при сбое)
+        image_result = await fetch_dish_image(title)
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -552,12 +549,20 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             ]
         ])
 
-        if image_url:
-            try:
-                await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown", reply_markup=kb)
+        try:
+            if image_result.startswith("dish_"):
+                # Отправляем локально сохраненный файл картинки от нейросети
+                await call.message.answer_photo(photo=FSInputFile(image_result), caption=caption, parse_mode="Markdown", reply_markup=kb)
+                # Удаляем временный файл после отправки
+                if os.path.exists(image_result):
+                    os.remove(image_result)
                 continue
-            except Exception:
-                pass
+            else:
+                # Отправляем по URL (если сработала резервная база)
+                await call.message.answer_photo(photo=image_result, caption=caption, parse_mode="Markdown", reply_markup=kb)
+                continue
+        except Exception as e:
+            logging.error(f"Не удалось отправить фото: {e}")
 
         await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
