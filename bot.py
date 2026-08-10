@@ -73,7 +73,7 @@ async def generate_image_bytes(dish_name_ru: str) -> Optional[bytes]:
     try:
         # Запрос к YandexART через OpenAI SDK агрегатора Polza AI
         response = await polza_client.images.generate(
-            model="yandex-art",  # Модель YandexART в Polza AI
+            model="yandex/yandex-art",  # Модель YandexART в Polza AI
             prompt=prompt,
             size="1024x1024",
             n=1
