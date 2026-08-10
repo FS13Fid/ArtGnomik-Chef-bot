@@ -18,6 +18,7 @@ from aiohttp import web
 from openai import AsyncOpenAI
 
 # Для интеграции с Google Таблицами
+import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
