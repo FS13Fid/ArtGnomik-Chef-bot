@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -13,7 +12,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiohttp import web
 from openai import AsyncOpenAI
 
@@ -31,16 +30,6 @@ BOT_TOKEN = os.environ.get(
 GROQ_API_KEY = os.environ.get(
     "GROQ_API_KEY", 
     "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"
-).strip()
-
-YANDEX_CLOUD_FOLDER = os.environ.get(
-    "YANDEX_CLOUD_FOLDER", 
-    "b1gqkn7qf0sab32u6ghg"
-).strip()
-
-YANDEX_CLOUD_API_KEY = os.environ.get(
-    "YANDEX_CLOUD_API_KEY", 
-    "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ"
 ).strip()
 
 # API КЛЮЧ SPOONACULAR
@@ -99,6 +88,7 @@ def main_keyboard(user_id: int):
 
 
 def check_access(user_id: int) -> bool:
+    # При необходимости для тестов можно временно вернуть True
     return USERS_DB.get(user_id, {}).get("is_full", False)
 
 
@@ -106,7 +96,7 @@ def check_access(user_id: int) -> bool:
 # РАБОТА СО СПЕЦИАЛИЗИРОВАННЫМ CULINARY API (Spoonacular)
 # -------------------------------------------------------------------
 async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
-    """Запрашивает структурированный рецепт из базы данных Spoonacular API."""
+    """Запрашивает структурированный рецепт, картинку и цены из базы данных Spoonacular API."""
     if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_SPOONACULAR_API_KEY":
         logging.warning("SPOONACULAR_API_KEY не задан. Используем резервную генерацию через LLM.")
         return {}
@@ -118,7 +108,7 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
         "number": 1,
         "addRecipeInformation": True,
         "fillIngredients": True,
-        "language": "ru" # Запрос на русском языке
+        "language": "ru"
     }
 
     try:
@@ -129,12 +119,10 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                     results = data.get("results", [])
                     if results:
                         r = results[0]
-                        
-                        # Извлекаем базовую информацию
                         title = r.get("title", dish_name)
                         ready_in_minutes = r.get("readyInMinutes", 30)
+                        image_url = r.get("image", "")  # Готовая картинка с сайта
                         
-                        # Шаги приготовления
                         instructions_list = []
                         analyzed_instructions = r.get("analyzedInstructions", [])
                         if analyzed_instructions:
@@ -147,25 +135,39 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                         if not instructions_list:
                             instructions_list = ["1. [⏱ 30 мин] Готовить согласно классической технологии."]
 
-                        # Ингредиенты
                         ingredients_list = []
                         extended_ingredients = r.get("extendedIngredients", [])
                         total_price = 0
 
+                        real_market_prices = {
+                            "chicken": 350,
+                            "beef": 650,
+                            "pork": 450,
+                            "rice": 120,
+                            "pasta": 95,
+                            "milk": 80,
+                            "cheese": 750,
+                            "tomato": 250,
+                            "cucumber": 200,
+                            "potato": 50,
+                            "onion": 40,
+                            "garlic": 300,
+                            "oil": 150,
+                            "egg": 110
+                        }
+
                         for ing in extended_ingredients:
                             name = ing.get("name", "Продукт")
                             amount = ing.get("amount", 1)
-                            # Пересчитываем количество под нужное число персон (в API базово часто на 1-2 порции)
                             servings_base = r.get("servings", 2) or 2
                             adjusted_amount = round(amount * (persons / servings_base), 1)
                             unit = ing.get("unit", "шт")
                             
-                            # Категоризация
                             aisle = ing.get("aisle", "").lower()
                             category = "other"
                             is_pantry = False
                             
-                            if any(w in aisle for w in ["meat", "seafood", "produce", "mисо", "мясо", "рыба"]):
+                            if any(w in aisle for w in ["meat", "seafood", "produce", "мясо", "рыба"]):
                                 category = "protein"
                             elif any(w in aisle for w in ["pasta", "rice", "cereal", "крупы", "макароны"]):
                                 category = "garnish"
@@ -178,6 +180,18 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                                 is_pantry = True
 
                             est_price = 100
+                            name_lower = name.lower()
+                            for key, price_per_unit in real_market_prices.items():
+                                if key in name_lower:
+                                    if "г" in unit.lower():
+                                        est_price = int(price_per_unit * (adjusted_amount / 1000))
+                                    elif "мл" in unit.lower() or "л" in unit.lower():
+                                        est_price = int(price_per_unit * adjusted_amount)
+                                    else:
+                                        est_price = int(price_per_unit * max(adjusted_amount, 1) * 0.2)
+                                    break
+                            
+                            est_price = max(est_price, 35)
                             total_price += est_price
 
                             ingredients_list.append({
@@ -196,7 +210,8 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                             "serving": "Подавать в теплом виде",
                             "instructions": instructions_list,
                             "ingredients": ingredients_list,
-                            "recipe_price": total_price
+                            "recipe_price": total_price,
+                            "image_url": image_url
                         }
     except Exception as e:
         logging.error(f"Ошибка запроса к Spoonacular API: {e}")
@@ -288,41 +303,6 @@ async def sub_active_alert(call: types.CallbackQuery):
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ЧЕРЕЗ YANDEX CLOUD (OpenAI SDK)
-# -------------------------------------------------------------------
-async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
-    if not YANDEX_CLOUD_API_KEY or not YANDEX_CLOUD_FOLDER:
-        logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: YANDEX_CLOUD_API_KEY или YANDEX_CLOUD_FOLDER не заданы!")
-        return None
-
-    clean_name = re.sub(r'[^а-яА-Яa-zA-Z0-9\s]', '', dish_name_ru).strip()
-    prompt = (
-        f"Аппетитная фуд-фотография блюда: {clean_name}. "
-        f"Красивая ресторанная сервировка, крупный план, аппетитные текстуры, профессиональный свет, 8k."
-    )
-
-    try:
-        yandex_openai_client = AsyncOpenAI(
-            api_key=YANDEX_CLOUD_API_KEY,
-            base_url="https://ai.api.cloud.yandex.net/v1",
-            project=YANDEX_CLOUD_FOLDER
-        )
-        
-        img = await yandex_openai_client.images.generate(
-            model=f"art://{YANDEX_CLOUD_FOLDER}/aliceai-image-art-3.0/latest",
-            prompt=prompt,
-            size="1024x1024"
-        )
-
-        if img.data and img.data[0].b64_json:
-            return base64.b64decode(img.data[0].b64_json)
-        return None
-    except Exception as e:
-        logging.exception(f"❌ Исключение при запросе к YandexART: {e}")
-        return None
-
-
-# -------------------------------------------------------------------
 # ГЕНЕРАЦИЯ МЕНЮ С ИСПОЛЬЗОВАНИЕМ CULINARY API
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool, budget: int) -> dict:
@@ -331,7 +311,6 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     soup_status = "Разрешены супы и салаты." if soup_salad else ""
     budget_status = f"Бюджет: {budget} руб." if budget > 0 else ""
 
-    # Сначала запрашиваем у LLM список названий блюд под критерии пользователя
     prompt_list = f"""
     Ты шеф-повар. Предложи список из {dinners} РАЗНЫХ названий популярных ужинов для {persons} человек.
     {veg_status} {cal_status} {soup_status} {budget_status}
@@ -352,10 +331,8 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     total_rub = 0
 
     for name in dish_names:
-        # Пытаемся получить рецепт из базы данных Spoonacular API
         dish_data = await fetch_recipe_from_api(name, persons)
 
-        # Если API недоступно или не нашло рецепт, используем LLM как резервный источник
         if not dish_data:
             prompt_dish = f"""
             Ты шеф-повар. Оформи рецепт для блюда "{name}" на {persons} человек.
@@ -376,7 +353,8 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
                   "estimated_price_rub": 150
                 }}
               ],
-              "recipe_price": 500
+              "recipe_price": 500,
+              "image_url": ""
             }}
             Категории ингредиентов (поле category): "protein", "garnish", "dairy", "vegetables", "pantry", "other".
             """
@@ -402,7 +380,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
 
 
 async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
-    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог, сохранив оригинальные шаги и тайминги. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.'
+    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог, сохранив оригинальные шаги и тайминги. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price, image_url.'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -416,7 +394,7 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
 
 
 async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
-    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты, включая ingredients, instructions, recipe_price).'
+    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты).'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -611,7 +589,8 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     for idx, dish in enumerate(dishes):
         title = dish['title']
         summary_text += f"**{idx+1}.** {title}\n"
-        img_bytes = await generate_yandex_art_bytes(title)
+        
+        image_url = dish.get("image_url")
         caption = format_dish_text(dish, idx, data.get("persons", 1))
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -621,8 +600,8 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             ]
         ])
 
-        if img_bytes:
-            await call.message.answer_photo(photo=BufferedInputFile(img_bytes, filename=f"dish_{idx+1}.png"), caption=caption, parse_mode="Markdown", reply_markup=kb)
+        if image_url:
+            await call.message.answer_photo(photo=image_url, caption=caption, parse_mode="Markdown", reply_markup=kb)
         else:
             await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
