@@ -15,6 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiohttp import web
 from openai import AsyncOpenAI
+from google import genai
 
 # Импортируем официальный SDK ЮKassa
 from yookassa import Configuration, Payment
@@ -37,6 +38,11 @@ SPOONACULAR_API_KEY = os.environ.get(
     "SPOONACULAR_API_KEY",
     "1d01fb14d9ad4aa383a5b95c116b131c"
 ).strip()
+
+# GOOGLE GEMINI (Бесплатный резерв)
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AQ.Ab8RN6I_xi52oshIN0N7K_HDgDSxzjzx7siEswwzfEfWpsFU9Q").strip()
+google_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+GOOGLE_MODEL = "gemini-2.5-flash"
 
 # НАСТРОЙКИ ЮKASSA
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "YOUR_SHOP_ID").strip()
@@ -120,7 +126,6 @@ async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
                         ready_in_minutes = r.get("readyInMinutes", 30)
                         image_url = r.get("image", "")  # Реальная ссылка на картинку от Spoonacular
                         
-                        # Парсим пошаговую инструкцию
                         instructions_list = []
                         analyzed_instructions = r.get("analyzedInstructions", [])
                         if analyzed_instructions:
@@ -274,7 +279,7 @@ async def sub_active_alert(call: types.CallbackQuery):
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ МЕНЮ С ИСПОЛЬЗОВАНИЕМ CULINARY API
+# ГЕНЕРАЦИЯ МЕНЮ С АВТО-ПЕРЕКЛЮЧЕНИЕМ (Groq -> Google Gemini)
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool,
                              budget: int) -> dict:
@@ -288,6 +293,8 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     {veg_status} {cal_status} {soup_status} {budget_status}
     Верни ответ СТРОГО в формате JSON с ключом "dish_names" (список строк).
     """
+    
+    dish_names = []
     try:
         res_list = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -296,9 +303,21 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
             temperature=0.7
         )
         dish_names = json.loads(res_list.choices[0].message.content).get("dish_names", [])
-    except Exception:
-        dish_names = ["Паста с курицей и грибами", "Овощное рагу", "Запеченная рыба с гарниром", "Куриный суп"][
-            :dinners]
+    except Exception as e:
+        logging.warning(f"Groq недоступен для списка ({e}), переключаемся на Gemini...")
+        if google_client:
+            try:
+                response = google_client.models.generate_content(
+                    model=GOOGLE_MODEL,
+                    contents=prompt_list,
+                    config={"response_mime_type": "application/json"}
+                )
+                dish_names = json.loads(response.text).get("dish_names", [])
+            except Exception as ex:
+                logging.error(f"Gemini тоже выдал ошибку: {ex}")
+
+    if not dish_names:
+        dish_names = ["Паста с курицей и грибами", "Овощное рагу", "Запеченная рыба с гарниром", "Куриный суп"][:dinners]
 
     dishes = []
     total_rub = 0
@@ -339,9 +358,20 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
                     temperature=0.3
                 )
                 dish_data = json.loads(resp.choices[0].message.content)
-            except Exception as e:
-                logging.error(f"Ошибка резервной генерации для {name}: {e}")
-                continue
+            except Exception:
+                if google_client:
+                    try:
+                        response = google_client.models.generate_content(
+                            model=GOOGLE_MODEL,
+                            contents=prompt_dish,
+                            config={"response_mime_type": "application/json"}
+                        )
+                        dish_data = json.loads(response.text)
+                    except Exception as e:
+                        logging.error(f"Ошибка резервной генерации для {name}: {e}")
+                        continue
+                else:
+                    continue
 
         dishes.append(dish_data)
         total_rub += dish_data.get("recipe_price", 400)
@@ -363,6 +393,16 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
         )
         return json.loads(response.choices[0].message.content)
     except Exception:
+        if google_client:
+            try:
+                response = google_client.models.generate_content(
+                    model=GOOGLE_MODEL,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json"}
+                )
+                return json.loads(response.text)
+            except Exception:
+                pass
         return dish
 
 
@@ -377,6 +417,16 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
         )
         return json.loads(response.choices[0].message.content).get("options", [])
     except Exception:
+        if google_client:
+            try:
+                response = google_client.models.generate_content(
+                    model=GOOGLE_MODEL,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json"}
+                )
+                return json.loads(response.text).get("options", [])
+            except Exception:
+                pass
         return []
 
 
