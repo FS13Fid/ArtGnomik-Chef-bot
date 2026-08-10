@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -20,7 +21,10 @@ from openai import AsyncOpenAI
 # -------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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").strip()
-POLZA_API_KEY = os.environ.get("POLZA_API_KEY", "pza_CAHvoksXc1MMKJI7j6ooRDOfaeG4sjv-").strip()
+
+YANDEX_CLOUD_FOLDER = os.environ.get("YANDEX_CLOUD_FOLDER", "b1gqkn7qf0sab32u6ghg").strip()
+YANDEX_CLOUD_API_KEY = os.environ.get("YANDEX_CLOUD_API_KEY", "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ").strip()
+YANDEX_CLOUD_MODEL = "aliceai-image-art-3.0/latest"
 
 if not BOT_TOKEN:
     logging.warning("BOT_TOKEN не задан!")
@@ -28,18 +32,21 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Клиент Groq для текстового меню
+# Клиент Groq для генерации текстового меню
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# Клиент Polza AI для YandexArt
-polza_client = AsyncOpenAI(
-    base_url="https://api.polza.ai/v1",
-    api_key=POLZA_API_KEY
-) if POLZA_API_KEY else None
+# Клиент YandexART через OpenAI SDK
+yandex_art_client = None
+if YANDEX_CLOUD_API_KEY and YANDEX_CLOUD_FOLDER:
+    yandex_art_client = AsyncOpenAI(
+        api_key=YANDEX_CLOUD_API_KEY,
+        base_url="https://ai.api.cloud.yandex.net/v1",
+        project=YANDEX_CLOUD_FOLDER
+    )
 
 
 class UserPreferences(StatesGroup):
@@ -57,11 +64,11 @@ def main_keyboard():
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ЧЕРЕЗ POLZA.AI (YANDEX ART)
+# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ЧЕРЕЗ YANDEX ART (OPENAI COMPATIBLE API)
 # -------------------------------------------------------------------
-async def generate_image_bytes(dish_name_ru: str) -> Optional[bytes]:
-    if not polza_client:
-        logging.error("POLZA_API_KEY не установлен!")
+async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
+    if not yandex_art_client:
+        logging.error("❌ YANDEX_CLOUD_API_KEY или YANDEX_CLOUD_FOLDER не установлены!")
         return None
 
     clean_name = re.sub(r'[^а-яА-Яa-zA-Z0-9\s]', '', dish_name_ru).strip()
@@ -71,31 +78,23 @@ async def generate_image_bytes(dish_name_ru: str) -> Optional[bytes]:
     )
 
     try:
-        # Запрос к YandexART через OpenAI SDK агрегатора Polza AI
-        response = await polza_client.images.generate(
-            model="yandex/yandex-art",  # Модель YandexART в Polza AI
+        logging.info(f"🎨 Запрос к YandexART для блюда: {clean_name}")
+        
+        response = await yandex_art_client.images.generate(
+            model=f"art://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
             prompt=prompt,
-            size="1024x1024",
-            n=1
+            size="1024x1024"
         )
-        
-        # Получаем URL или Base64 (в зависимости от формата ответа агрегатора)
-        image_data = response.data[0]
-        
-        if hasattr(image_data, 'url') and image_data.url:
-            # Если вернулась ссылка — скачиваем картинку в байты
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_data.url) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
-                        
-        elif hasattr(image_data, 'b64_json') and image_data.b64_json:
-            # Если Polza отдала base64
-            import base64
-            return base64.b64decode(image_data.b64_json)
+
+        b64_data = response.data[0].b64_json
+        if b64_data:
+            logging.info(f"✅ Картинка для '{clean_name}' успешно сгенерирована!")
+            return base64.b64decode(b64_data)
+        else:
+            logging.error("❌ Поле b64_json оказалось пустым в ответе YandexART")
 
     except Exception as e:
-        logging.error(f"Polza AI (YandexART) Error: {e}")
+        logging.error(f"❌ Ошибка генерации YandexART: {e}", exc_info=True)
 
     return None
 
@@ -180,14 +179,14 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
 
 
 # -------------------------------------------------------------------
-# ХЕНДЛЕРЫ
+# ХЕНДЛЕРЫ BOT AIOGRAM
 # -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=1, dinners=4, vegetarian=False)
     welcome_text = (
         "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я формирую идеальное меню на неделю с генерацией фотографий блюд через YandexArt (Polza AI), удобным списком покупок и расчётом стоимости!"
+        "Я формирую идеальное меню на неделю с генерацией фотографий блюд через YandexART, удобным списком покупок и расчётом стоимости!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -246,7 +245,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("🤖 Составляю подборку ужинов, генерирую фото через YandexArt...")
+    await call.message.answer("🤖 Составляю подборку ужинов и генерирую фото через YandexART...")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -262,12 +261,11 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
         summary_text += f"**{idx}** {title} ({time_str})\n"
 
-        # Промпт отправляем напрямую на русском языке, YandexArt отлично его понимает
-        img_bytes = await generate_image_bytes(title)
+        img_bytes = await generate_yandex_art_bytes(title)
         caption = f"**День {idx}: {title}**\n⏱ {time_str} | 👤 На {persons} перс.\n\n📖 **Рецепт:**\n{dish['recipe']}"
 
         if img_bytes:
-            photo_file = BufferedInputFile(img_bytes, filename=f"dish_{idx}.jpg")
+            photo_file = BufferedInputFile(img_bytes, filename=f"dish_{idx}.png")
             await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown")
         else:
             await call.message.answer(caption, parse_mode="Markdown")
