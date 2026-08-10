@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -17,27 +17,27 @@ from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 # -------------------------------------------------------------------
-# НАСТРОЙКИ И КЛЮЧИ (Из Environment Variables на Render)
+# НАСТРОЙКИ И КЛЮЧИ
 # -------------------------------------------------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4").strip()
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6LlFyN81MAneoVi87G8geF0BiXpekvc4ZxtelbEmjoWkg").strip()
+
+if not BOT_TOKEN:
+    logging.warning("BOT_TOKEN не задан! Проверьте переменные окружения.")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Клиент Groq для генерации текста и рецептов
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# Клиент Google GenAI (Imagen 3 / Gemini)
-google_client = genai.Client(api_key=GEMINI_API_KEY)
+google_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
-# FSM Состояния
 class UserPreferences(StatesGroup):
     persons = State()
     dinners = State()
@@ -52,16 +52,16 @@ def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Генерация изображения блюда через Google AI (Imagen 3)
+# Генерация изображения через Google Imagen 3
 async def generate_google_image_bytes(dish_name_en: str) -> Optional[bytes]:
+    if not google_client:
+        return None
     clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en).strip()
     prompt = (
-        f"A professional photo of a delicious food dish: {clean_name}. "
-        f"Cozy aesthetic home dinner setting, warm lighting, top view, appetizing food photography, highly detailed."
+        f"A professional top-view food photograph of {clean_name}. "
+        f"Cozy aesthetic home dinner setting, warm lighting, appetizing presentation, 8k quality."
     )
-    
     try:
-        # Вызов генерации изображения Imagen 3 через SDK Google GenAI
         result = await asyncio.to_thread(
             google_client.models.generate_images,
             model='imagen-3.0-generate-002',
@@ -72,37 +72,59 @@ async def generate_google_image_bytes(dish_name_en: str) -> Optional[bytes]:
                 output_mime_type="image/jpeg",
             )
         )
-        
         if result.generated_images:
             return result.generated_images[0].image.image_bytes
     except Exception as e:
         logging.error(f"Google Imagen API Error: {e}")
-        
     return None
 
 
-# Быстрая генерация меню через Groq
+# Запрос к Groq с категоризацией ингредиентов и расчетом цен
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Любые блюда (мясо, птица, рыба)."
 
     prompt = f"""
-    Ты шеф-повар. Сгенерируй случайное меню из {dinners} уникальных ужинов для {persons} человек.
+    Ты шеф-повар. Сгенерируй меню из {dinners} уникальных ужинов для {persons} человек.
     Предпочтения: {veg_status}
 
-    Верни ответ строго в формате JSON, соблюдая следующую структуру:
+    Верни ответ строго в формате JSON:
     {{
+      "estimated_total_rub": 1850,
       "dishes": [
         {{
-          "title": "Уникальное название блюда на русском с эмодзи",
-          "title_en": "Very short clear English search term/description for image generation (e.g., 'creamy salmon pasta', 'baked potato with cheese', 'spaghetti bolognese')",
-          "cooking_time": "30 мин",
+          "title": "Уникальное название блюда на русском",
+          "title_en": "English search term for food image generation",
+          "cooking_time": "25 мин",
           "recipe": "Краткое пошаговое описание приготовления",
           "ingredients": [
-            {{"name": "Название продукта", "amount": 150, "unit": "г"}}
+            {{
+              "name": "Название продукта",
+              "amount": 150,
+              "unit": "г",
+              "category": "protein", 
+              "is_pantry": false,
+              "estimated_price_rub": 180
+            }}
           ]
         }}
       ]
     }}
+
+    Правила оценки стоимости:
+    - estimated_price_rub: примерная стоимость указанного количества продукта в российских рублях (в супермаркете).
+    - estimated_total_rub: примерная итоговая сумма всей корзины покупок (без учета базовых продуктов из "is_pantry").
+
+    Категории ингредиентов ("category"):
+    - "protein": Белок (мясо, рыба, птица, фарш)
+    - "garnish": Гарнир/крупы (макароны, рис, картофель)
+    - "vegetables": Овощи и зелень (грибы, томаты, лук, зелень)
+    - "dairy": Молочные продукты и сыры (сливки, сыр, творог)
+    - "bakery": Хлеб/лаваш
+    - "other": Прочее
+
+    Значение "is_pantry":
+    - true: если это базовая приправа/масло/мука/соль, которая обычно есть дома.
+    - false: если это покупной продукт для рецепта.
     """
 
     try:
@@ -110,38 +132,38 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a helpful culinary assistant that responds only in JSON format."},
+                {"role": "system", "content": "You are a culinary assistant that output JSON only."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7
         )
-
-        content = response.choices[0].message.content
-        return json.loads(content)
-
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
         logging.error(f"Groq API Error: {e}")
         return {
-            "dishes": [{
-                "title": "Быстрые спагетти с сыром 🧀",
-                "title_en": "spaghetti with cheese",
-                "cooking_time": "15 мин",
-                "recipe": "Отварите пасту до состояния al dente и посыпьте тертым сыром.",
-                "ingredients": [{"name": "Спагетти", "amount": 100, "unit": "г"}, {"name": "Сыр", "amount": 50, "unit": "г"}]
-            }]
+            "estimated_total_rub": 1200,
+            "dishes": [
+                {
+                    "title": "Спагетти Болоньезе",
+                    "title_en": "spaghetti bolognese",
+                    "cooking_time": "25 мин",
+                    "recipe": "Обжарьте фарш с томатами и подавайте со спагетти.",
+                    "ingredients": [
+                        {"name": "Мясной фарш", "amount": 150, "unit": "г", "category": "protein", "is_pantry": False, "estimated_price_rub": 180},
+                        {"name": "Спагетти", "amount": 100, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 60},
+                        {"name": "Оливковое масло", "amount": 1, "unit": "ст.л.", "category": "other", "is_pantry": True, "estimated_price_rub": 0}
+                    ]
+                }
+            ]
         }
 
 
-# -------------------------------------------------------------------
-# ХЭНДЛЕРЫ BOT AIOgram
-# -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.update_data(persons=1, dinners=3, vegetarian=False)
-
+    await state.update_data(persons=1, dinners=4, vegetarian=False)
     welcome_text = (
         "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я составляю меню с помощью **Groq AI** и генерирую красивые фотографии блюд через **Google AI (Imagen 3)**!"
+        "Я формирую идеальное меню на неделю с генерацией фотографий блюд, удобным списком покупок и расчётом стоимости!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -159,11 +181,10 @@ async def start_settings(call: types.CallbackQuery, state: FSMContext):
 async def process_persons(call: types.CallbackQuery, state: FSMContext):
     persons = int(call.data.split("_")[1])
     await state.update_data(persons=persons)
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="3 ужина", callback_data="d_3"), InlineKeyboardButton(text="5 ужинов", callback_data="d_5")]
+        [InlineKeyboardButton(text="3 ужина", callback_data="d_3"), InlineKeyboardButton(text="4 ужина", callback_data="d_4"), InlineKeyboardButton(text="5 ужинов", callback_data="d_5")]
     ])
-    await call.message.edit_text("Сколько ужинов планируем на неделю?", reply_markup=kb)
+    await call.message.edit_text("Сколько ужинов планируем?", reply_markup=kb)
     await state.set_state(UserPreferences.dinners)
 
 
@@ -171,7 +192,6 @@ async def process_persons(call: types.CallbackQuery, state: FSMContext):
 async def process_dinners(call: types.CallbackQuery, state: FSMContext):
     dinners = int(call.data.split("_")[1])
     await state.update_data(dinners=dinners)
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Да 🌱", callback_data="v_yes"), InlineKeyboardButton(text="Нет 🥩", callback_data="v_no")]
     ])
@@ -183,7 +203,6 @@ async def process_dinners(call: types.CallbackQuery, state: FSMContext):
 async def process_veg(call: types.CallbackQuery, state: FSMContext):
     is_veg = (call.data == "v_yes")
     await state.update_data(vegetarian=is_veg)
-
     user_data = await state.get_data()
     veg_status = "да 🌱" if user_data.get("vegetarian") else "нет 🥩"
 
@@ -193,7 +212,6 @@ async def process_veg(call: types.CallbackQuery, state: FSMContext):
         f"• Кол-во ужинов: {user_data.get('dinners')}\n"
         f"• Вегетарианские блюда: {veg_status}"
     )
-
     await call.message.edit_text(info_text, reply_markup=main_keyboard())
 
 
@@ -201,29 +219,29 @@ async def process_veg(call: types.CallbackQuery, state: FSMContext):
 async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     persons = data.get("persons", 1)
-    dinners_count = data.get("dinners", 3)
+    dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("🤖 Составляю меню и генерирую сочные фото через Google AI...")
+    await call.message.answer("🤖 Составляю подборку ужинов, считаем бюджет и генерируем фото...")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
-    
-    await state.update_data(current_dishes=dishes)
+    total_rub = ai_data.get("estimated_total_rub", 0)
+
+    await state.update_data(current_dishes=dishes, total_rub=total_rub)
+
+    summary_text = "**Обновили список блюд** 🍿\n\n"
 
     for idx, dish in enumerate(dishes, 1):
-        dish_en = dish.get("title_en", "delicious meal")
-        cooking_time = dish.get("cooking_time", "30 мин")
-        
-        # Генерация изображения через Google Imagen 3
+        dish_en = dish.get("title_en", "meal")
+        time_str = dish.get("cooking_time", "25 мин")
+        title = dish['title']
+
+        summary_text += f"**{idx}** {title} ({time_str})\n"
+
         img_bytes = await generate_google_image_bytes(dish_en)
-        
-        caption = (
-            f"**День {idx}: {dish['title']}**\n"
-            f"⏱ Время приготовления: {cooking_time} | 👤 На {persons} перс.\n\n"
-            f"📖 **Рецепт:**\n{dish['recipe']}"
-        )
-        
+        caption = f"**День {idx}: {title}**\n⏱ {time_str} | 👤 На {persons} перс.\n\n📖 **Рецепт:**\n{dish['recipe']}"
+
         if img_bytes:
             photo_file = BufferedInputFile(img_bytes, filename=f"dish_{idx}.jpg")
             await call.message.answer_photo(photo=photo_file, caption=caption, parse_mode="Markdown")
@@ -231,13 +249,16 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             await call.message.answer(caption, parse_mode="Markdown")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 Сформировать список продуктов", callback_data="get_shopping_list")],
-        [InlineKeyboardButton(text="🔄 Сгенерировать новые рецепты", callback_data="new_selection")]
+        [
+            InlineKeyboardButton(text="Список продуктов 🛒", callback_data="get_shopping_list"),
+            InlineKeyboardButton(text="Заменить блюдо 🍝", callback_data="new_selection")
+        ]
     ])
 
-    await call.message.answer("✨ Меню сформировано!", reply_markup=kb)
+    await call.message.answer(summary_text, parse_mode="Markdown", reply_markup=kb)
 
 
+# Формирование списка покупок с примерной стоимостью
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -248,30 +269,70 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
         await call.answer("Сначала сгенерируйте подборку!")
         return
 
-    shopping_cart: Dict[str, Dict] = {}
+    categories = {
+        "protein": {"title": "🥩 Белок", "items": {}},
+        "garnish": {"title": "🍚 Гарнир", "items": {}},
+        "vegetables": {"title": "🥦 Овощи и зелень", "items": {}},
+        "dairy": {"title": "🥛 Молочка", "items": {}},
+        "bakery": {"title": "🥖 Хлеб", "items": {}},
+        "other": {"title": "📦 Прочее", "items": {}}
+    }
+
+    pantry_items: Dict[str, Dict] = {}
+    calculated_total = 0
 
     for dish in dishes:
         for ing in dish.get("ingredients", []):
             name = ing["name"].capitalize()
             amount = ing.get("amount", 0)
-            unit = ing.get("unit", "шт")
+            unit = ing.get("unit", "")
+            cat = ing.get("category", "other")
+            is_pantry = ing.get("is_pantry", False)
+            price = ing.get("estimated_price_rub", 0)
 
-            if name in shopping_cart:
-                shopping_cart[name]["amount"] += amount
+            target_dict = pantry_items if is_pantry else categories.get(cat, categories["other"])["items"]
+
+            if not is_pantry:
+                calculated_total += price
+
+            if name in target_dict:
+                if isinstance(amount, (int, float)):
+                    target_dict[name]["amount"] += amount
+                target_dict[name]["price"] += price
             else:
-                shopping_cart[name] = {"amount": amount, "unit": unit}
+                target_dict[name] = {"amount": amount, "unit": unit, "price": price}
 
-    result_text = f"🛒 **Список продуктов в магазин ({persons} чел.):**\n\n"
-    for ing_name, info in shopping_cart.items():
-        amt = info["amount"]
-        amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
-        result_text += f"• {ing_name}: **{amt_str} {info['unit']}**\n"
+    res = f"🛒 **Список покупок ({len(dishes)} бл., {persons} чел.)**\n\n"
+
+    for cat_key, cat_data in categories.items():
+        if cat_data["items"]:
+            res += f"{cat_data['title']}:\n"
+            for name, info in cat_data["items"].items():
+                amt = info["amount"]
+                amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
+                res += f"• {name} — {amt_str} {info['unit']}\n"
+            res += "\n"
+
+    if pantry_items:
+        res += "🏠 **Скорее всего есть у вас дома:**\n\n"
+        for name, info in pantry_items.items():
+            amt = info["amount"]
+            amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
+            res += f"• {name} — {amt_str} {info['unit']}\n"
+        res += "\n"
+
+    # Расчёт диапазона стоимости (например, 1400–1700 ₽)
+    min_price = int(calculated_total * 0.9) if calculated_total > 0 else 1200
+    max_price = int(calculated_total * 1.15) if calculated_total > 0 else 1600
+
+    res += f"💳 **Примерная стоимость корзины покупок:**\n"
+    res += f"~ {min_price} – {max_price} ₽ *(оценка на основе средних цен супермаркетов)*"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В главное меню 🏠", callback_data="back_main")]
     ])
 
-    await call.message.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+    await call.message.answer(res, parse_mode="Markdown", reply_markup=kb)
 
 
 @dp.callback_query(F.data == "back_main")
@@ -282,16 +343,14 @@ async def back_to_main(call: types.CallbackQuery, state: FSMContext):
     info_text = (
         f"Текущие параметры ✏️❤️\n"
         f"• Кол-во человек: {user_data.get('persons', 1)}\n"
-        f"• Кол-во ужинов: {user_data.get('dinners', 3)}\n"
+        f"• Кол-во ужинов: {user_data.get('dinners', 4)}\n"
         f"• Вегетарианские блюда: {veg_status}"
     )
-
     await call.message.answer(info_text, reply_markup=main_keyboard())
 
 
-# Web server для поддержки вебхуков / пингов Render
 async def handle_ping(request):
-    return web.Response(text="Art Gnomik is running with Google AI!")
+    return web.Response(text="Art Gnomik Chef Service OK")
 
 
 async def start_web_server():
