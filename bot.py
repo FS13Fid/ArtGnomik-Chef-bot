@@ -43,22 +43,21 @@ class UserPreferences(StatesGroup):
 
 def main_keyboard():
     kb = [
-        [InlineKeyboardButton(text="Новая подборка ✨ (Groq + Pollinations)", callback_data="new_selection")],
+        [InlineKeyboardButton(text="Новая подборка ✨", callback_data="new_selection")],
         [InlineKeyboardButton(text="Настроить фильтрацию ⚙️", callback_data="settings")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Бесплатная генерация ссылки на фото блюда через Pollinations.ai
+# Бесплатная генерация ссылки на фото блюда через актуальный API Pollinations.ai
 def generate_pollinations_image_url(dish_name_en: str) -> str:
-    # Очищаем название от лишних символов
     clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en)
-    # Составляем детальный промпт для красивого фуд-фото
-    prompt = f"professional food photo of {clean_name}, high quality, highly detailed, appetizing, studio lighting, 8k"
+    prompt = f"delicious food photo of {clean_name}, appetizing, high detailed, studio lighting, 8k"
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 999999)
-    # nologo=true убирает водяной знак
-    return f"https://pollinations.ai/p/{encoded_prompt}?width=800&height=600&seed={seed}&nologo=true"
+    
+    # Используем обновленный рабочий URL с моделью flux
+    return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=800&height=600&seed={seed}&model=flux&nologo=true"
 
 
 # Быстрая генерация меню через Groq
