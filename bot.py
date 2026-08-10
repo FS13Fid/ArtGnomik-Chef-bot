@@ -167,7 +167,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
        - "garnish" (для круп, макарон, картофеля, макаронных изделий)
        - "vegetables" (для свежих овощей, грибов, томатов в собственном соку и т.д.)
        - "greens" (для зелени, салатов, трав)
-       - "dairy" (для сыров, творога, сливок, молока, сметаны, масла сливочного если оно в категории молочки, но сливочное/растительное масло в `is_pantry: true` автоматически уйдет в масла)
+       - "dairy" (для сыров, творога, сливок, молока, сметаны)
        - "nuts" (для орехов, кунжута, семечек)
        - "bakery" (для хлеба, лаваша, муки)
        - "spices" (для приправ, специй, соли, перца)
@@ -362,7 +362,16 @@ async def cmd_menu(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "settings")
 async def start_settings(call: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 чел", callback_data="p_1"), InlineKeyboardButton(text="2 чел", callback_data="p_2"), InlineKeyboardButton(text="4 чел", callback_data="p_4")]
+        [
+            InlineKeyboardButton(text="1 чел", callback_data="p_1"),
+            InlineKeyboardButton(text="2 чел", callback_data="p_2"),
+            InlineKeyboardButton(text="3 чел", callback_data="p_3")
+        ],
+        [
+            InlineKeyboardButton(text="4 чел", callback_data="p_4"),
+            InlineKeyboardButton(text="5 чел", callback_data="p_5"),
+            InlineKeyboardButton(text="6 чел", callback_data="p_6")
+        ]
     ])
     await call.message.edit_text("👤 **Кол-во человек:**", reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserPreferences.persons)
@@ -656,7 +665,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
         await call.answer("Сначала сгенерируйте подборку!")
         return
 
-    # Шаблонные категории для магазина
     shop_categories = {
         "protein": {"title": "🥩 Белок:", "items": {}},
         "garnish": {"title": "🍚 Гарнир:", "items": {}},
@@ -668,7 +676,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
         "other": {"title": "📦 Прочее:", "items": {}}
     }
 
-    # Шаблонные категории для того, что дома
     pantry_categories = {
         "oil": {"title": "🧈 Масло:", "items": {}},
         "bakery": {"title": "🌾 Мука:", "items": {}},
@@ -697,7 +704,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
 
     res = f"🛒 Список покупок ({dinners_count} бл., {persons} чел.)\n\n"
 
-    # Вывод магазина
     for cat_key, cat_data in shop_categories.items():
         if cat_data["items"]:
             res += f"{cat_data['title']}\n"
@@ -709,7 +715,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
 
     res += "🏠 Скорее всего есть у вас дома:\n\n"
 
-    # Вывод домашнего запаса
     for cat_key, cat_data in pantry_categories.items():
         if cat_data["items"]:
             res += f"{cat_data['title']}\n"
