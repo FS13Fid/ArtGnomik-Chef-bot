@@ -16,7 +16,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiohttp import web
 from openai import AsyncOpenAI
-from duckduckgo_search import DDGS
 
 # Импортируем официальный SDK ЮKassa
 from yookassa import Configuration, Payment
@@ -42,6 +41,12 @@ YANDEX_CLOUD_FOLDER = os.environ.get(
 YANDEX_CLOUD_API_KEY = os.environ.get(
     "YANDEX_CLOUD_API_KEY", 
     "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ"
+).strip()
+
+# API КЛЮЧ SPOONACULAR
+SPOONACULAR_API_KEY = os.environ.get(
+    "SPOONACULAR_API_KEY", 
+    "1d01fb14d9ad4aa383a5b95c116b131c"
 ).strip()
 
 # НАСТРОЙКИ ЮKASSA
@@ -98,19 +103,105 @@ def check_access(user_id: int) -> bool:
 
 
 # -------------------------------------------------------------------
-# ВЕБ-ПОИСК РЕЦЕПТА С КОНКРЕТНОГО САЙТА (russianfood.com)
+# РАБОТА СО СПЕЦИАЛИЗИРОВАННЫМ CULINARY API (Spoonacular)
 # -------------------------------------------------------------------
-async def search_single_recipe_source(dish_name: str) -> str:
-    """Ищет рецепт строго на сайте russianfood.com и берет текст из первого найденного результата."""
+async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
+    """Запрашивает структурированный рецепт из базы данных Spoonacular API."""
+    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_SPOONACULAR_API_KEY":
+        logging.warning("SPOONACULAR_API_KEY не задан. Используем резервную генерацию через LLM.")
+        return {}
+
+    url = "https://api.spoonacular.com/recipes/complexSearch"
+    params = {
+        "apiKey": SPOONACULAR_API_KEY,
+        "query": dish_name,
+        "number": 1,
+        "addRecipeInformation": True,
+        "fillIngredients": True,
+        "language": "ru" # Запрос на русском языке
+    }
+
     try:
-        query = f"site:russianfood.com классический рецепт {dish_name}"
-        with DDGS() as ddgs:
-            results = [r.get('body', '') for r in ddgs.text(query, max_results=1)]
-        if results:
-            return results[0]
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    results = data.get("results", [])
+                    if results:
+                        r = results[0]
+                        
+                        # Извлекаем базовую информацию
+                        title = r.get("title", dish_name)
+                        ready_in_minutes = r.get("readyInMinutes", 30)
+                        
+                        # Шаги приготовления
+                        instructions_list = []
+                        analyzed_instructions = r.get("analyzedInstructions", [])
+                        if analyzed_instructions:
+                            steps = analyzed_instructions[0].get("steps", [])
+                            for step in steps:
+                                num = step.get("number", 1)
+                                text = step.get("step", "")
+                                instructions_list.append(f"{num}. [⏱ {ready_in_minutes // max(len(steps), 1)} мин] {text}")
+                        
+                        if not instructions_list:
+                            instructions_list = ["1. [⏱ 30 мин] Готовить согласно классической технологии."]
+
+                        # Ингредиенты
+                        ingredients_list = []
+                        extended_ingredients = r.get("extendedIngredients", [])
+                        total_price = 0
+
+                        for ing in extended_ingredients:
+                            name = ing.get("name", "Продукт")
+                            amount = ing.get("amount", 1)
+                            # Пересчитываем количество под нужное число персон (в API базово часто на 1-2 порции)
+                            servings_base = r.get("servings", 2) or 2
+                            adjusted_amount = round(amount * (persons / servings_base), 1)
+                            unit = ing.get("unit", "шт")
+                            
+                            # Категоризация
+                            aisle = ing.get("aisle", "").lower()
+                            category = "other"
+                            is_pantry = False
+                            
+                            if any(w in aisle for w in ["meat", "seafood", "produce", "mисо", "мясо", "рыба"]):
+                                category = "protein"
+                            elif any(w in aisle for w in ["pasta", "rice", "cereal", "крупы", "макароны"]):
+                                category = "garnish"
+                            elif any(w in aisle for w in ["milk", "cheese", "dairy", "молочные"]):
+                                category = "dairy"
+                            elif any(w in aisle for w in ["vegetable", "fruit", "овощи", "фрукты"]):
+                                category = "vegetables"
+                            elif any(w in aisle for w in ["oil", "spice", "baking", "масла", "специи"]):
+                                category = "pantry"
+                                is_pantry = True
+
+                            est_price = 100
+                            total_price += est_price
+
+                            ingredients_list.append({
+                                "name": name,
+                                "amount": adjusted_amount,
+                                "unit": unit if unit else "шт",
+                                "category": category,
+                                "is_pantry": is_pantry,
+                                "estimated_price_rub": est_price
+                            })
+
+                        return {
+                            "title": title,
+                            "cooking_time": f"{ready_in_minutes} мин",
+                            "equipment": "Плита, духовка",
+                            "serving": "Подавать в теплом виде",
+                            "instructions": instructions_list,
+                            "ingredients": ingredients_list,
+                            "recipe_price": total_price
+                        }
     except Exception as e:
-        logging.error(f"Ошибка веб-поиска рецепта на russianfood.com: {e}")
-    return ""
+        logging.error(f"Ошибка запроса к Spoonacular API: {e}")
+    
+    return {}
 
 
 # -------------------------------------------------------------------
@@ -232,7 +323,7 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
 
 
 # -------------------------------------------------------------------
-# ЗАПРОСЫ К GROQ С ОДНИМ ИСТОЧНИКОМ И СТРОГИМИ ТАЙМИНГАМИ
+# ГЕНЕРАЦИЯ МЕНЮ С ИСПОЛЬЗОВАНИЕМ CULINARY API
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool, budget: int) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Разнообразные блюда."
@@ -240,8 +331,9 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     soup_status = "Разрешены супы и салаты." if soup_salad else ""
     budget_status = f"Бюджет: {budget} руб." if budget > 0 else ""
 
+    # Сначала запрашиваем у LLM список названий блюд под критерии пользователя
     prompt_list = f"""
-    Ты шеф-повар. Предложи список из {dinners} РАЗНЫХ названий вкусных ужинов для {persons} человек.
+    Ты шеф-повар. Предложи список из {dinners} РАЗНЫХ названий популярных ужинов для {persons} человек.
     {veg_status} {cal_status} {soup_status} {budget_status}
     Верни ответ СТРОГО в формате JSON с ключом "dish_names" (список строк).
     """
@@ -260,61 +352,48 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     total_rub = 0
 
     for name in dish_names:
-        # Получаем данные строго из russianfood.com
-        single_source_text = await search_single_recipe_source(name)
+        # Пытаемся получить рецепт из базы данных Spoonacular API
+        dish_data = await fetch_recipe_from_api(name, persons)
 
-        prompt_dish = f"""
-        Ты шеф-повар. Оформи рецепт для блюда "{name}" на {persons} человек, используя **исключительно** приведенный ниже текст с сайта russianfood.com.
-        
-        Текст с russianfood.com:
-        {single_source_text}
-
-        ЖЕСТКИЕ ПРАВИЛА:
-        1. НЕ СМЕШИВАЙ данные из других источников. Пользуйся только текстом выше.
-        2. Поле "cooking_time" бери СТРОГО из этого текста.
-        3. Внутри поля "instructions" каждый шаг ОБЯЗАН содержать время в формате [⏱ X мин], причем бери это время строго из текста источника (если оно там указано).
-        
-        Верни ответ СТРОГО в формате JSON:
-        {{
-          "title": "{name}",
-          "cooking_time": "30 мин",
-          "equipment": "Сковорода",
-          "serving": "Подача",
-          "instructions": ["1. [⏱ 7 мин] Шаг...", "2. [⏱ 4 мин] Шаг..."],
-          "ingredients": [
+        # Если API недоступно или не нашло рецепт, используем LLM как резервный источник
+        if not dish_data:
+            prompt_dish = f"""
+            Ты шеф-повар. Оформи рецепт для блюда "{name}" на {persons} человек.
+            Верни ответ СТРОГО в формате JSON:
             {{
-              "name": "Продукт", 
-              "amount": 200, 
-              "unit": "г", 
-              "category": "protein", 
-              "is_pantry": false, 
-              "estimated_price_rub": 150
+              "title": "{name}",
+              "cooking_time": "30 мин",
+              "equipment": "Сковорода",
+              "serving": "Подача",
+              "instructions": ["1. [⏱ 7 мин] Шаг...", "2. [⏱ 4 мин] Шаг..."],
+              "ingredients": [
+                {{
+                  "name": "Продукт", 
+                  "amount": 200, 
+                  "unit": "г", 
+                  "category": "protein", 
+                  "is_pantry": false, 
+                  "estimated_price_rub": 150
+                }}
+              ],
+              "recipe_price": 500
             }}
-          ]
-        }}
-        Категории ингредиентов (поле category):
-        - "protein" (🥩 Белок)
-        - "garnish" (🍚 Гарнир)
-        - "dairy" (🥛 Молочка)
-        - "vegetables" (🥦 Овощи и зелень)
-        - "pantry" (🧈 Масло и приправы)
-        - "other" (📦 Прочее)
-        Поле is_pantry ставь true для масел, соли, специй.
-        """
-        try:
-            resp = await groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt_dish}],
-                temperature=0.2  # Минимальная температура для строгого следования источнику
-            )
-            dish_data = json.loads(resp.choices[0].message.content)
-            dishes.append(dish_data)
-            
-            for ing in dish_data.get("ingredients", []):
-                total_rub += ing.get("estimated_price_rub", 100)
-        except Exception as e:
-            logging.error(f"Ошибка генерации детального рецепта для {name}: {e}")
+            Категории ингредиентов (поле category): "protein", "garnish", "dairy", "vegetables", "pantry", "other".
+            """
+            try:
+                resp = await groq_client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    response_format={"type": "json_object"},
+                    messages=[{"role": "user", "content": prompt_dish}],
+                    temperature=0.3
+                )
+                dish_data = json.loads(resp.choices[0].message.content)
+            except Exception as e:
+                logging.error(f"Ошибка резервной генерации для {name}: {e}")
+                continue
+
+        dishes.append(dish_data)
+        total_rub += dish_data.get("recipe_price", 400)
 
     return {
         "estimated_total_rub": total_rub if total_rub > 0 else 2500,
@@ -323,7 +402,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
 
 
 async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
-    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог, сохранив оригинальные шаги и тайминги. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients.'
+    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог, сохранив оригинальные шаги и тайминги. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -337,8 +416,7 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
 
 
 async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
-    single_source_text = await search_single_recipe_source(old_dish_title)
-    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел., опираясь на контекст: {single_source_text}. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты).'
+    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты, включая ingredients, instructions, recipe_price).'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -509,7 +587,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("⚠️ **Требуется подписка**\n\nДля генерации персонального меню оформите подписку кнопкой ниже.", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
-    await call.answer("Ищу рецепты с russianfood.com...")
+    await call.answer("Загружаю рецепты из базы данных API...")
     data = await state.get_data()
     
     ai_data = await generate_groq_menu(
