@@ -70,7 +70,7 @@ async def generate_image_bytes(dish_name_en: str) -> Optional[bytes]:
 
     try:
         response = await polza_client.images.generate(
-            model="dall-e-3",  # или актуальное имя модели из панели Polza.ai
+            model="yandex/yandex-art",  # или актуальное имя модели из панели Polza.ai
             prompt=prompt,
             size="1024x1024",
             quality="standard",
