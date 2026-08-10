@@ -17,6 +17,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedIn
 from aiohttp import web
 from openai import AsyncOpenAI
 
+# Для интеграции с Google Таблицами
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
 # -------------------------------------------------------------------
 # НАСТРОЙКИ И КЛЮЧИ
 # -------------------------------------------------------------------
@@ -40,12 +44,6 @@ YANDEX_CLOUD_API_KEY = os.environ.get(
     "AQVNy2WbsDUNV210s00DiEHqXqoxstoRlgNo6ldQ"
 ).strip()
 
-# URL вашего развернутого Google Apps Script (Web App)
-GOOGLE_WEB_APP_URL = os.environ.get(
-    "GOOGLE_WEB_APP_URL", 
-    "ВАШ_URL_ИЗ_APPS_SCRIPT"
-).strip()
-
 if not BOT_TOKEN:
     logging.warning("BOT_TOKEN не задан!")
 
@@ -60,42 +58,71 @@ groq_client = AsyncOpenAI(
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # -------------------------------------------------------------------
-# ЛОГИКА ДОСТУПА ЧЕРЕЗ GOOGLE APPS SCRIPT (БЕЗ gspread)
+# ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS
+# -------------------------------------------------------------------
+try:
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    # Пытаемся взять JSON из переменной окружения Render
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        # Запасной вариант для локального запуска (если файл есть рядом)
+        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+        
+    client = gspread.authorize(creds)
+    sheet = client.open("Бот-Промокоды")  
+    users_ws = sheet.worksheet("users")
+    promos_ws = sheet.worksheet("promocodes")
+    logging.info(" Успешное подключение к Google Таблице!")
+except Exception as e:
+    logging.error(f" ОШИБКА подключения к Google Таблице: {e}")
+
+
+# -------------------------------------------------------------------
+# ЛОГИКА ДОСТУПА ЧЕРЕЗ ТАБЛИЦЫ
 # -------------------------------------------------------------------
 def check_user_access(user_id: int) -> str:
-    """Возвращает статус: 'trial', 'full' или 'expired' через Web App"""
+    """Возвращает статус: 'trial', 'full' или 'expired'"""
     try:
-        response = requests.post(
-            GOOGLE_WEB_APP_URL, 
-            json={"action": "check", "user_id": str(user_id)}, 
-            timeout=10
-        )
-        data = response.json()
-        return data.get("status", "trial")
+        cell = users_ws.find(str(user_id))
+        if not cell:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            users_ws.append_row([str(user_id), 'trial', now])
+            return 'trial'
+        
+        row = users_ws.row_values(cell.row)
+        status = row[1]
+        
+        if status == 'full':
+            return 'full'
+        
+        start_date = datetime.strptime(row[2], '%Y-%m-%d %H:%M:%S')
+        if datetime.now() - start_date < timedelta(hours=24):
+            return 'trial'
+        else:
+            return 'expired'
     except Exception as e:
         logging.error(f"Ошибка проверки доступа: {e}")
         return 'trial'
 
 def activate_user_promo(user_id: int):
-    """Меняет статус пользователя на 'full' через Web App"""
+    """Меняет статус пользователя на 'full'"""
     try:
-        requests.post(
-            GOOGLE_WEB_APP_URL, 
-            json={"action": "activate", "user_id": str(user_id)}, 
-            timeout=10
-        )
+        cell = users_ws.find(str(user_id))
+        if cell:
+            users_ws.update_cell(cell.row, 2, 'full')
     except Exception as e:
-        logging.error(f"Ошибка активации промокода: {e}")
+        logging.error(f"Ошибка активации промокода в таблице: {e}")
 
 def validate_promo_code(promo_text: str) -> bool:
-    """Проверяет наличие кода в таблице через Web App"""
+    """Проверяет наличие кода в листе 'promocodes'"""
     try:
-        response = requests.post(
-            GOOGLE_WEB_APP_URL, 
-            json={"action": "validate_promo", "promo": promo_text.strip()}, 
-            timeout=10
-        )
-        return response.json().get("valid", False)
+        codes = promos_ws.col_values(1)
+        return promo_text.strip() in codes
     except Exception as e:
         logging.error(f"Ошибка проверки промокода: {e}")
         return False
@@ -349,18 +376,35 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
     ing_str = "\n".join([f"• {i['name']} — {i['amount']} {i['unit']}" for i in ing_list])
 
     instructions = dish.get("instructions", [])
+    formatted_instructions = []
+    
     if isinstance(instructions, list):
-        inst_str = "\n".join(instructions)
+        for i, step in enumerate(instructions, 1):
+            clean_step = str(step).strip()
+            
+            # Убираем старую нумерацию, если модель прислала её вместе со строкой
+            for prefix in [f"{i}.", f"{i}."]:
+                if clean_step.startswith(prefix):
+                    clean_step = clean_step[len(prefix):].strip()
+            
+            # Если в тексте шага уже есть иконка часиков, оставляем как есть, иначе добавляем
+            if "⏱️" not in clean_step and "⏱" not in clean_step:
+                # Если в шаге есть указание времени в скобках (например, "[ 5 мин]"), превращаем его в формат с иконкой
+                clean_step = re.sub(r'\[\s*(\d+\s*мин)\s*\]', r'⏱️ \1', clean_step)
+            
+            formatted_instructions.append(f"{i}. {clean_step}")
+            
+        inst_str = "\n".join(formatted_instructions)
     else:
         inst_str = str(instructions)
 
     text = (
-        f" **{title.upper()}**\n"
-        f" Общее время: {time_str} |  На {persons} чел.\n\n"
-        f" **Ингредиенты:**\n{ing_str}\n\n"
-        f" **Оборудование:** {equipment}\n\n"
-        f" **Пошаговая инструкция:**\n{inst_str}\n\n"
-        f" **Подача:** {serving}"
+        f"🍳 **{title.upper()}**\n"
+        f"⏱ Общее время: {time_str} | 👤 На {persons} чел.\n\n"
+        f"🛒 **Ингредиенты:**\n{ing_str}\n\n"
+        f"🛠 **Оборудование:** {equipment}\n\n"
+        f"📖 **Пошаговая инструкция:**\n{inst_str}\n\n"
+        f"🥗 **Подача:** {serving}"
     )
     return text
 
@@ -755,30 +799,3 @@ async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
-    
-# -------------------------------------------------------------------
-# ЗАПУСК БОТА И WEB-СЕРВЕРА (ЧТОБЫ RENDER НЕ ВЫДАВАЛ ОШИБКУ ПОРТА)
-# -------------------------------------------------------------------
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
-async def web_server():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    # Render автоматически передает порт через переменную окружения PORT
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logging.info(f"Веб-сервер запущен на порту {port}")
-
-async def main():
-    # Запускаем веб-сервер в фоне для Render
-    await web_server()
-    # Запускаем сам телеграм-бот
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
