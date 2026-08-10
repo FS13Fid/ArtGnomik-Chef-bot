@@ -284,3 +284,23 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    import os
+from aiohttp import web
+
+# Простой веб-сервер для Render Free Tier
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+# Добавьте вызов start_web_server() в вашу функцию main():
+# async def main():
+#     await start_web_server()  <-- добавить эту строчку
+#     await dp.start_polling(bot)
