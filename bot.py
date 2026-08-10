@@ -93,7 +93,7 @@ def check_access(user_id: int) -> bool:
 
 async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
     """Запрашивает структурированный рецепт, картинку и цены из базы данных Spoonacular API."""
-    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "1d01fb14d9ad4aa383a5b95c116b131c":
+    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_SPOONACULAR_API_KEY":
         logging.warning("SPOONACULAR_API_KEY не задан.")
         return {}
 
