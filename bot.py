@@ -28,14 +28,14 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Клиент Groq для генерации текстового меню
+# Клиент Groq для текстового меню
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# Клиент Polza AI для генерации изображений
+# Клиент Polza AI для YandexArt
 polza_client = AsyncOpenAI(
     base_url="https://api.polza.ai/v1",
     api_key=POLZA_API_KEY
@@ -56,40 +56,53 @@ def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Генерация изображения через Polza.ai
-async def generate_image_bytes(dish_name_en: str) -> Optional[bytes]:
+# -------------------------------------------------------------------
+# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ЧЕРЕЗ POLZA.AI (YANDEX ART)
+# -------------------------------------------------------------------
+async def generate_image_bytes(dish_name_ru: str) -> Optional[bytes]:
     if not polza_client:
         logging.error("POLZA_API_KEY не установлен!")
         return None
 
-    clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en).strip()
+    clean_name = re.sub(r'[^а-яА-Яa-zA-Z0-9\s]', '', dish_name_ru).strip()
     prompt = (
-        f"A professional top-view food photograph of {clean_name}. "
-        f"Cozy aesthetic home dinner setting, warm lighting, appetizing presentation, highly detailed, 8k quality."
+        f"Профессиональная аппетитная фуд-фотография блюда {clean_name}. "
+        f"Уютная домашняя сервировка, теплое мягкое освещение, вид сверху, высокая детализация, 8k."
     )
 
     try:
+        # Запрос к YandexART через OpenAI SDK агрегатора Polza AI
         response = await polza_client.images.generate(
-            model="yandex/yandex-art",  # или актуальное имя модели из панели Polza.ai
+            model="yandex-art",  # Модель YandexART в Polza AI
             prompt=prompt,
             size="1024x1024",
-            quality="standard",
             n=1
         )
-        image_url = response.data[0].url
+        
+        # Получаем URL или Base64 (в зависимости от формата ответа агрегатора)
+        image_data = response.data[0]
+        
+        if hasattr(image_data, 'url') and image_data.url:
+            # Если вернулась ссылка — скачиваем картинку в байты
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_data.url) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+                        
+        elif hasattr(image_data, 'b64_json') and image_data.b64_json:
+            # Если Polza отдала base64
+            import base64
+            return base64.b64decode(image_data.b64_json)
 
-        # Скачиваем сгенерированное изображение по URL
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url) as resp:
-                if resp.status == 200:
-                    return await resp.read()
     except Exception as e:
-        logging.error(f"Polza AI Error: {e}")
+        logging.error(f"Polza AI (YandexART) Error: {e}")
 
     return None
 
 
-# Запрос к Groq с категоризацией ингредиентов и расчетом цен
+# -------------------------------------------------------------------
+# ЗАПРОС К GROQ
+# -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Любые блюда (мясо, птица, рыба)."
 
@@ -103,7 +116,6 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
       "dishes": [
         {{
           "title": "Уникальное название блюда на русском",
-          "title_en": "English search term for food image generation",
           "cooking_time": "25 мин",
           "recipe": "Краткое пошаговое описание приготовления",
           "ingredients": [
@@ -155,7 +167,6 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
             "dishes": [
                 {
                     "title": "Спагетти Болоньезе",
-                    "title_en": "spaghetti bolognese",
                     "cooking_time": "25 мин",
                     "recipe": "Обжарьте фарш с томатами и подавайте со спагетти.",
                     "ingredients": [
@@ -168,12 +179,15 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
         }
 
 
+# -------------------------------------------------------------------
+# ХЕНДЛЕРЫ
+# -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=1, dinners=4, vegetarian=False)
     welcome_text = (
         "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я формирую идеальное меню на неделю с генерацией фотографий блюд через Polza AI, удобным списком покупок и расчётом стоимости!"
+        "Я формирую идеальное меню на неделю с генерацией фотографий блюд через YandexArt (Polza AI), удобным списком покупок и расчётом стоимости!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -232,7 +246,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("🤖 Составляю подборку ужинов, генерируем фото через Polza AI...")
+    await call.message.answer("🤖 Составляю подборку ужинов, генерирую фото через YandexArt...")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -243,13 +257,13 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     summary_text = "**Обновили список блюд** 🍿\n\n"
 
     for idx, dish in enumerate(dishes, 1):
-        dish_en = dish.get("title_en", "meal")
-        time_str = dish.get("cooking_time", "25 мин")
         title = dish['title']
+        time_str = dish.get("cooking_time", "25 мин")
 
         summary_text += f"**{idx}** {title} ({time_str})\n"
 
-        img_bytes = await generate_image_bytes(dish_en)
+        # Промпт отправляем напрямую на русском языке, YandexArt отлично его понимает
+        img_bytes = await generate_image_bytes(title)
         caption = f"**День {idx}: {title}**\n⏱ {time_str} | 👤 На {persons} перс.\n\n📖 **Рецепт:**\n{dish['recipe']}"
 
         if img_bytes:
