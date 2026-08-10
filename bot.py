@@ -5,6 +5,7 @@ import os
 import re
 from typing import Dict, List, Optional
 
+import aiohttp
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,8 +13,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiohttp import web
-from google import genai
-from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 # -------------------------------------------------------------------
@@ -21,21 +20,26 @@ from openai import AsyncOpenAI
 # -------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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").strip()
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6LlFyN81MAneoVi87G8geF0BiXpekvc4ZxtelbEmjoWkg").strip()
+POLZA_API_KEY = os.environ.get("POLZA_API_KEY", "pza_CAHvoksXc1MMKJI7j6ooRDOfaeG4sjv-").strip()
 
 if not BOT_TOKEN:
-    logging.warning("BOT_TOKEN не задан! Проверьте переменные окружения.")
+    logging.warning("BOT_TOKEN не задан!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Клиент Groq для генерации текстового меню
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-google_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# Клиент Polza AI для генерации изображений
+polza_client = AsyncOpenAI(
+    base_url="https://api.polza.ai/v1",
+    api_key=POLZA_API_KEY
+) if POLZA_API_KEY else None
 
 
 class UserPreferences(StatesGroup):
@@ -46,36 +50,42 @@ class UserPreferences(StatesGroup):
 
 def main_keyboard():
     kb = [
-        [InlineKeyboardButton(text="Новая подборка ✨ (Groq + Google AI)", callback_data="new_selection")],
+        [InlineKeyboardButton(text="Новая подборка ✨", callback_data="new_selection")],
         [InlineKeyboardButton(text="Настроить фильтрацию ⚙️", callback_data="settings")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# Генерация изображения через Google Imagen 3
-async def generate_google_image_bytes(dish_name_en: str) -> Optional[bytes]:
-    if not google_client:
+# Генерация изображения через Polza.ai
+async def generate_image_bytes(dish_name_en: str) -> Optional[bytes]:
+    if not polza_client:
+        logging.error("POLZA_API_KEY не установлен!")
         return None
+
     clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', dish_name_en).strip()
     prompt = (
         f"A professional top-view food photograph of {clean_name}. "
-        f"Cozy aesthetic home dinner setting, warm lighting, appetizing presentation, 8k quality."
+        f"Cozy aesthetic home dinner setting, warm lighting, appetizing presentation, highly detailed, 8k quality."
     )
+
     try:
-        result = await asyncio.to_thread(
-            google_client.models.generate_images,
-            model='imagen-3.0-generate-002',
+        response = await polza_client.images.generate(
+            model="dall-e-3",  # или актуальное имя модели из панели Polza.ai
             prompt=prompt,
-            config=genai_types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio="4:3",
-                output_mime_type="image/jpeg",
-            )
+            size="1024x1024",
+            quality="standard",
+            n=1
         )
-        if result.generated_images:
-            return result.generated_images[0].image.image_bytes
+        image_url = response.data[0].url
+
+        # Скачиваем сгенерированное изображение по URL
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as resp:
+                if resp.status == 200:
+                    return await resp.read()
     except Exception as e:
-        logging.error(f"Google Imagen API Error: {e}")
+        logging.error(f"Polza AI Error: {e}")
+
     return None
 
 
@@ -111,7 +121,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
     }}
 
     Правила оценки стоимости:
-    - estimated_price_rub: примерная стоимость указанного количества продукта в российских рублях (в супермаркете).
+    - estimated_price_rub: примерная стоимость указанного количества продукта в российских рублях.
     - estimated_total_rub: примерная итоговая сумма всей корзины покупок (без учета базовых продуктов из "is_pantry").
 
     Категории ингредиентов ("category"):
@@ -163,7 +173,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=1, dinners=4, vegetarian=False)
     welcome_text = (
         "Привет! Я **Art Gnomik Chef** 🧙‍♂️🍝\n\n"
-        "Я формирую идеальное меню на неделю с генерацией фотографий блюд, удобным списком покупок и расчётом стоимости!"
+        "Я формирую идеальное меню на неделю с генерацией фотографий блюд через Polza AI, удобным списком покупок и расчётом стоимости!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -222,7 +232,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("🤖 Составляю подборку ужинов, считаем бюджет и генерируем фото...")
+    await call.message.answer("🤖 Составляю подборку ужинов, генерируем фото через Polza AI...")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -239,7 +249,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
         summary_text += f"**{idx}** {title} ({time_str})\n"
 
-        img_bytes = await generate_google_image_bytes(dish_en)
+        img_bytes = await generate_image_bytes(dish_en)
         caption = f"**День {idx}: {title}**\n⏱ {time_str} | 👤 На {persons} перс.\n\n📖 **Рецепт:**\n{dish['recipe']}"
 
         if img_bytes:
@@ -258,7 +268,6 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer(summary_text, parse_mode="Markdown", reply_markup=kb)
 
 
-# Формирование списка покупок с примерной стоимостью
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -321,7 +330,6 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
             res += f"• {name} — {amt_str} {info['unit']}\n"
         res += "\n"
 
-    # Расчёт диапазона стоимости (например, 1400–1700 ₽)
     min_price = int(calculated_total * 0.9) if calculated_total > 0 else 1200
     max_price = int(calculated_total * 1.15) if calculated_total > 0 else 1600
 
