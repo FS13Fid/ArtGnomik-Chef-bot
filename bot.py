@@ -15,7 +15,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiohttp import web
 from openai import AsyncOpenAI
-from google import genai
 
 # Импортируем официальный SDK ЮKassa
 from yookassa import Configuration, Payment
@@ -39,9 +38,13 @@ SPOONACULAR_API_KEY = os.environ.get(
     "1d01fb14d9ad4aa383a5b95c116b131c"
 ).strip()
 
-# GOOGLE GEMINI (Бесплатный резерв)
+# GOOGLE GEMINI (Бесплатный резерв через OpenAI-совместимый API)
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AQ.Ab8RN6I_xi52oshIN0N7K_HDgDSxzjzx7siEswwzfEfWpsFU9Q").strip()
-google_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+google_client = AsyncOpenAI(
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=GOOGLE_API_KEY
+) if GOOGLE_API_KEY else None
+
 GOOGLE_MODEL = "gemini-2.5-flash"
 
 # НАСТРОЙКИ ЮKASSA
@@ -307,12 +310,13 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
         logging.warning(f"Groq недоступен для списка ({e}), переключаемся на Gemini...")
         if google_client:
             try:
-                response = google_client.models.generate_content(
+                response = await google_client.chat.completions.create(
                     model=GOOGLE_MODEL,
-                    contents=prompt_list,
-                    config={"response_mime_type": "application/json"}
+                    response_format={"type": "json_object"},
+                    messages=[{"role": "user", "content": prompt_list}],
+                    temperature=0.7
                 )
-                dish_names = json.loads(response.text).get("dish_names", [])
+                dish_names = json.loads(response.choices[0].message.content).get("dish_names", [])
             except Exception as ex:
                 logging.error(f"Gemini тоже выдал ошибку: {ex}")
 
@@ -361,12 +365,13 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
             except Exception:
                 if google_client:
                     try:
-                        response = google_client.models.generate_content(
+                        response = await google_client.chat.completions.create(
                             model=GOOGLE_MODEL,
-                            contents=prompt_dish,
-                            config={"response_mime_type": "application/json"}
+                            response_format={"type": "json_object"},
+                            messages=[{"role": "user", "content": prompt_dish}],
+                            temperature=0.3
                         )
-                        dish_data = json.loads(response.text)
+                        dish_data = json.loads(response.choices[0].message.content)
                     except Exception as e:
                         logging.error(f"Ошибка резервной генерации для {name}: {e}")
                         continue
@@ -395,12 +400,13 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
     except Exception:
         if google_client:
             try:
-                response = google_client.models.generate_content(
+                response = await google_client.chat.completions.create(
                     model=GOOGLE_MODEL,
-                    contents=prompt,
-                    config={"response_mime_type": "application/json"}
+                    response_format={"type": "json_object"},
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3
                 )
-                return json.loads(response.text)
+                return json.loads(response.choices[0].message.content)
             except Exception:
                 pass
         return dish
@@ -419,12 +425,13 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
     except Exception:
         if google_client:
             try:
-                response = google_client.models.generate_content(
+                response = await google_client.chat.completions.create(
                     model=GOOGLE_MODEL,
-                    contents=prompt,
-                    config={"response_mime_type": "application/json"}
+                    response_format={"type": "json_object"},
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.5
                 )
-                return json.loads(response.text).get("options", [])
+                return json.loads(response.choices[0].message.content).get("options", [])
             except Exception:
                 pass
         return []
