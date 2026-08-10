@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -15,6 +16,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiohttp import web
 from openai import AsyncOpenAI
+
+# Для интеграции с Google Таблицами
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # -------------------------------------------------------------------
 # НАСТРОЙКИ И КЛЮЧИ
@@ -52,6 +57,66 @@ groq_client = AsyncOpenAI(
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
+# -------------------------------------------------------------------
+# ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS
+# -------------------------------------------------------------------
+try:
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+    client = gspread.authorize(creds)
+    sheet = client.open("Бот-Промокоды") 
+    users_ws = sheet.worksheet("users")
+    promos_ws = sheet.worksheet("promocodes")
+    logging.info("✅ Успешное подключение к Google Таблице!")
+except Exception as e:
+    logging.error(f"❌ ОШИБКА подключения к Google Таблице: {e}")
+
+
+# -------------------------------------------------------------------
+# ЛОГИКА ДОСТУПА ЧЕРЕЗ ТАБЛИЦЫ
+# -------------------------------------------------------------------
+def check_user_access(user_id: int) -> str:
+    """Возвращает статус: 'trial', 'full' или 'expired'"""
+    try:
+        cell = users_ws.find(str(user_id))
+        if not cell:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            users_ws.append_row([str(user_id), 'trial', now])
+            return 'trial'
+        
+        row = users_ws.row_values(cell.row)
+        status = row[1]
+        
+        if status == 'full':
+            return 'full'
+        
+        start_date = datetime.strptime(row[2], '%Y-%m-%d %H:%M:%S')
+        if datetime.now() - start_date < timedelta(hours=24):
+            return 'trial'
+        else:
+            return 'expired'
+    except Exception as e:
+        logging.error(f"Ошибка проверки доступа: {e}")
+        return 'trial'
+
+def activate_user_promo(user_id: int):
+    """Меняет статус пользователя на 'full'"""
+    try:
+        cell = users_ws.find(str(user_id))
+        if cell:
+            users_ws.update_cell(cell.row, 2, 'full')
+    except Exception as e:
+        logging.error(f"Ошибка активации промокода в таблице: {e}")
+
+def validate_promo_code(promo_text: str) -> bool:
+    """Проверяет наличие кода в листе 'promocodes'"""
+    try:
+        codes = promos_ws.col_values(1)
+        return promo_text.strip() in codes
+    except Exception as e:
+        logging.error(f"Ошибка проверки промокода: {e}")
+        return False
+
 
 class UserPreferences(StatesGroup):
     persons = State()
@@ -59,7 +124,8 @@ class UserPreferences(StatesGroup):
     vegetarian = State()
     calories = State()
     soup_salad = State()
-    budget = State()  # Новое состояние для бюджета
+    budget = State()
+    waiting_for_promo = State()  # Состояние для ввода промокода
 
 
 def main_keyboard():
@@ -317,16 +383,56 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
 
 
 # -------------------------------------------------------------------
-# ХЕНДЛЕРЫ BOT AIOGRAM
+# ХЕНДЛЕРЫ BOT AIOGRAM (С ПРОВЕРКОЙ ДОСТУПА)
 # -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    access_status = check_user_access(user_id)
+
+    if access_status == 'expired':
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Ввести промокод 🔑", callback_data="enter_promo")]
+        ])
+        await message.answer(
+            "⏳ **Ваш пробный период (24 часа) истек!**\n\n"
+            "Чтобы продолжить пользоваться ботом, пожалуйста, введите промокод.",
+            reply_markup=kb, parse_mode="Markdown"
+        )
+        return
+
     await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True, budget=2500)
+    
+    trial_msg = "🎁 Вам доступен **бесплатный период (24 часа)**!" if access_status == 'trial' else ""
     welcome_text = (
-        "🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
+        f"🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
+        f"{trial_msg}\n"
         "Я составляю меню с **точным таймингом каждого шага**, делю ингредиенты на покупки и учитываю ваш бюджет!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
+
+
+@dp.callback_query(F.data == "enter_promo")
+async def ask_promo(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    await call.message.answer("🔑 Пожалуйста, введите ваш промокод ответным сообщением в чат:")
+    await state.set_state(UserPreferences.waiting_for_promo)
+
+
+@dp.message(UserPreferences.waiting_for_promo, F.text)
+async def process_promo_input(message: types.Message, state: FSMContext):
+    promo_text = message.text.strip()
+    
+    if validate_promo_code(promo_text):
+        activate_user_promo(message.from_user.id)
+        await state.clear()
+        await message.answer(
+            "✅ **Промокод успешно активирован!** Вам предоставлен полный доступ 🎉",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+    else:
+        await message.answer("❌ **Неверный промокод.** Попробуйте еще раз или обратитесь к администратору:", parse_mode="Markdown")
 
 
 @dp.message(Command("help"))
@@ -343,6 +449,11 @@ async def cmd_help(message: types.Message):
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if check_user_access(user_id) == 'expired':
+        await message.answer("⏳ Срок пробного доступа истек. Введите /start для активации.")
+        return
+
     data = await state.get_data()
     dishes = data.get("current_dishes", [])
 
@@ -488,7 +599,6 @@ async def finish_settings(message: types.Message, state: FSMContext):
         f"• Бюджет на закупку: {budget_str}\n\n"
         f"Готовы подобрать для вас блюда 🍝"
     )
-    # Если это callback_query.message или обычное сообщение
     if isinstance(message, types.CallbackQuery):
         await message.message.edit_text(info_text, reply_markup=main_keyboard(), parse_mode="Markdown")
     else:
@@ -497,6 +607,11 @@ async def finish_settings(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "new_selection")
 async def generate_selection(call: types.CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    if check_user_access(user_id) == 'expired':
+        await call.message.answer("⏳ Срок пробного доступа истек. Введите /start для активации.")
+        return
+
     await call.answer("Генерирую меню...")
     data = await state.get_data()
     persons = data.get("persons", 1)
@@ -613,7 +728,6 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
 
     dishes[dish_idx] = updated_dish
     
-    # Пересчитываем общую сумму
     total_rub = sum(
         sum(i.get("estimated_price_rub", 0) for i in d.get("ingredients", []) if not i.get("is_pantry", False))
         for d in dishes
@@ -763,93 +877,43 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
             is_pantry = ing.get("is_pantry", False)
 
             if is_pantry:
-                target_cat = pantry_categories.get(cat, pantry_categories["other"])["items"]
+                target_cat = pantry_categories.get(cat, pantry_categories["other"])
             else:
-                target_cat = shop_categories.get(cat, shop_categories["other"])["items"]
+                target_cat = shop_categories.get(cat, shop_categories["other"])
+            
+            target_cat["items"][name] = target_cat["items"].get(name, 0) + amount
 
-            if name in target_cat:
-                if isinstance(amount, (int, float)):
-                    target_cat[name]["amount"] += amount
-            else:
-                target_cat[name] = {"amount": amount, "unit": unit}
-
-    res = f"🛒 Список покупок ({dinners_count} бл., {persons} чел.)\n\n"
-
-    for cat_key, cat_data in shop_categories.items():
+    shop_text = f"🛒 **Список покупок на {dinners_count} ужинов**\n"
+    shop_text += f"👤 Расчет на {persons} чел. | 💰 Итог: ~{estimated_total} руб.\n\n"
+    
+    shop_text += "🔴 **Купить в магазине:**\n"
+    for cat_data in shop_categories.values():
         if cat_data["items"]:
-            res += f"{cat_data['title']}\n"
-            for name, info in cat_data['items'].items():
-                amt = info["amount"]
-                amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
-                res += f"• {name} — {amt_str} {info['unit']}\n"
-            res += "\n"
-
-    res += "🏠 Скорее всего есть у вас дома:\n\n"
-
-    for cat_key, cat_data in pantry_categories.items():
+            shop_text += f"{cat_data['title']}\n"
+            for name, amount in cat_data["items"].items():
+                shop_text += f"  - [ ] {name}: {amount}\n"
+            shop_text += "\n"
+            
+    shop_text += "🟢 **Проверьте дома (базовые):**\n"
+    for cat_data in pantry_categories.values():
         if cat_data["items"]:
-            res += f"{cat_data['title']}\n"
-            for name, info in cat_data['items'].items():
-                amt = info["amount"]
-                amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
-                res += f"• {name} — {amt_str} {info['unit']}\n"
-            res += "\n"
+            shop_text += f"{cat_data['title']}\n"
+            for name, amount in cat_data["items"].items():
+                shop_text += f"  - [ ] {name}: {amount}\n"
+            shop_text += "\n"
 
-    if estimated_total > 0:
-        res += f"💳 Примерная стоимость корзины покупок: **{estimated_total} руб.**"
-    else:
-        res += "💳 Примерная стоимость корзины покупок: Стоимость не рассчитана."
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="В главное меню 🏠", callback_data="back_main")]
-    ])
-
-    await call.message.answer(res, parse_mode="Markdown", reply_markup=kb)
+    await call.message.answer(shop_text, parse_mode="Markdown")
 
 
-@dp.callback_query(F.data == "back_main")
-async def back_to_main(call: types.CallbackQuery, state: FSMContext):
-    await call.answer()
-    user_data = await state.get_data()
-    veg_status = "не предлагать" if user_data.get("vegetarian") else "предлагать"
-    cal_status = "не предлагать" if not user_data.get("low_calories") else "до 600 ккал"
-    soup_status = "предлагать" if user_data.get("soup_salad") else "не предлагать"
-    budget_val = user_data.get("budget", 0)
-    budget_str = f"{budget_val} руб." if budget_val > 0 else "Без ограничений"
-
-    info_text = (
-        f"Учли ваши предпочтения ✏️❤️\n"
-        f"• Кол-во человек: {user_data.get('persons', 1)}\n"
-        f"• Кол-во ужинов: {user_data.get('dinners', 4)}\n"
-        f"• Вегетарианские блюда: {veg_status}\n"
-        f"• Менее калорийные блюда: {cal_status}\n"
-        f"• Супы/салаты: {soup_status}\n"
-        f"• Бюджет на закупку: {budget_str}\n\n"
-        f"Готовы подобрать для вас блюда 🍝"
-    )
-    await call.message.answer(info_text, parse_mode="Markdown", reply_markup=main_keyboard())
-
-
-async def handle_ping(request):
-    return web.Response(text="Bot is active")
-
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-
+# -------------------------------------------------------------------
+# ЗАПУСК БОТА
+# -------------------------------------------------------------------
 async def main():
     logging.basicConfig(level=logging.INFO)
-    await start_web_server()
-    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот остановлен")
