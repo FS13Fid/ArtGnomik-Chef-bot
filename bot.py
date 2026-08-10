@@ -43,6 +43,7 @@ YANDEX_CLOUD_API_KEY = os.environ.get(
     "YANDEX_CLOUD_API_KEY", 
     "123"
 ).strip()
+#   AQVNwj_6nJEIkW5YolgbZDXjgHueyVJStGtpcMX-   апи клауд яндекс
 
 # НАСТРОЙКИ ЮKASSA
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "YOUR_SHOP_ID").strip()
