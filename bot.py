@@ -158,8 +158,21 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
        Формат каждого шага должен быть строго с таймингом, например:
        "1. [⏱ 5 мин] Нарезка: нашинкуйте лук кубиками, а морковь натрите на крупной терке."
        "2. [⏱ 7 мин] Обжарка: разогрейте сковороду и обжаривайте лук с морковью на среднем огне до золотистого цвета."
-       "3. [⏱ 15 мин] Варка: добавьте бульон, доведите до кипения и варите на медленном огне."
     3. Ингредиенты рассчитывай строго на {persons} чел.
+    4. ДЛЯ КАЖДОГО ИНГРЕДИЕНТА укажи поле `is_pantry` (boolean):
+       - Если это базовый продукт, который обычно есть дома (масла: подсолнечное, оливковое, сливочное; мука; соль, черный перец, паприка, сушеные травы и другие специи), то поставь `is_pantry: true`.
+       - Для остальных продуктов (мясо, рыба, овощи, сыр, зелень, соусы, паста и т.д.) поставь `is_pantry: false`.
+    5. Для поля `category` используй строго одно из следующих значений:
+       - "protein" (для мяса, птицы, рыбы, морепродуктов, фарша, яиц)
+       - "garnish" (для круп, макарон, картофеля, макаронных изделий)
+       - "vegetables" (для свежих овощей, грибов, томатов в собственном соку и т.д.)
+       - "greens" (для зелени, салатов, трав)
+       - "dairy" (для сыров, творога, сливок, молока, сметаны, масла сливочного если оно в категории молочки, но сливочное/растительное масло в `is_pantry: true` автоматически уйдет в масла)
+       - "nuts" (для орехов, кунжута, семечек)
+       - "bakery" (для хлеба, лаваша, муки)
+       - "spices" (для приправ, специй, соли, перца)
+       - "oil" (для масел: оливковое, подсолнечное)
+       - "other" (для прочего)
 
     Верни ответ СТРОГО в формате JSON:
     {{
@@ -172,8 +185,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
           "serving": "Украсьте свежей зеленью и подавайте с долькой лимона",
           "instructions": [
             "1. [⏱ 5 мин] Подготовка и нарезка: ...",
-            "2. [⏱ 8 мин] Обжарка: ...",
-            "3. [⏱ 15 мин] Варка/Тушение: ..."
+            "2. [⏱ 8 мин] Обжарка: ..."
           ],
           "ingredients": [
             {{
@@ -195,7 +207,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a professional chef. Always output valid JSON with exact time for each cooking step."},
+                {"role": "system", "content": "You are a professional chef. Always output valid JSON with exact time for each cooking step and correct is_pantry flags."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7
@@ -212,8 +224,8 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
     Замени ингредиент "{old_ingredient}" на подходящий аналог.
     Обнови подробно список ингредиентов и пошаговую инструкцию.
     
-    ТРЕБОВАНИЕ: В пошаговой инструкции на КАЖДОМ шаге указывай точное время (сколько минут резать, варить, жарить и т.д.) в формате:
-    "1. [⏱ 5 мин] Текст шага..."
+    ТРЕБОВАНИЕ: В пошаговой инструкции на КАЖДОМ шаге указывай точное время в формате "1. [⏱ 5 мин] Текст шага...".
+    Для каждого ингредиента укажи `is_pantry` (true для базовых масел, муки, соли, перца, специй; false для остальных) и правильную категорию (`protein`, `garnish`, `vegetables`, `greens`, `dairy`, `nuts`, `bakery`, `spices`, `oil`, `other`).
 
     Верни ответ строго в формате JSON с полями: title, cooking_time, equipment, serving, instructions (массив строк), ingredients (массив объектов).
     """
@@ -223,7 +235,7 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a professional chef assistant returning valid JSON with step-by-step timing."},
+                {"role": "system", "content": "You are a professional chef assistant returning valid JSON with step timing."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7
@@ -239,7 +251,7 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
 
     prompt = f"""
     Предложи 3 альтернативных подробных блюда взамен "{old_dish_title}" для {persons} чел. ({veg_status}).
-    В пошаговой инструкции КАЖДЫЙ шаг обязан содержать точное время (сколько резать, жарить, варить).
+    В пошаговой инструкции КАЖДЫЙ шаг обязан содержать точное время. Укажи корректно `is_pantry` и `category` для всех ингредиентов.
     
     Верни ответ строго в формате JSON:
     {{
@@ -309,7 +321,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True)
     welcome_text = (
         "🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
-        "Я составляю меню с **точным таймингом каждого шага** (сколько резать, жарить, варить) и генерирую фото блюд!"
+        "Я составляю меню с **точным таймингом каждого шага** и делю ингредиенты на покупки и то, что есть дома!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -321,7 +333,7 @@ async def cmd_help(message: types.Message):
         "/start — Главное меню\n"
         "/menu — Посмотреть текущий рацион\n"
         "/help — Справка\n\n"
-        "Нажмите **«Новая подборка»**, чтобы сгенерировать новое меню с точным временем готовки!"
+        "Нажмите **«Новая подборка»**, чтобы сгенерировать новое меню!"
     )
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -435,12 +447,13 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian, low_calories, soup_salad)
     dishes = ai_data.get("dishes", [])
+    total_rub = ai_data.get("estimated_total_rub", 0)
 
     if not dishes:
         await call.message.answer("Произошла ошибка при генерации. Попробуйте еще раз!", reply_markup=main_keyboard())
         return
 
-    await state.update_data(current_dishes=dishes)
+    await state.update_data(current_dishes=dishes, estimated_total_rub=total_rub)
 
     summary_text = "🎉 **Ваше меню готово!**\n\n"
 
@@ -635,22 +648,33 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     persons = data.get("persons", 1)
+    dinners_count = len(data.get("current_dishes", []))
     dishes = data.get("current_dishes", [])
+    estimated_total = data.get("estimated_total_rub", 0)
 
     if not dishes:
         await call.answer("Сначала сгенерируйте подборку!")
         return
 
-    categories = {
-        "protein": {"title": "🥩 Белок / Основные продукты", "items": {}},
-        "garnish": {"title": "🍚 Гарниры и крупы", "items": {}},
-        "vegetables": {"title": "🥦 Овощи и зелень", "items": {}},
-        "dairy": {"title": "🥛 Молочные продукты", "items": {}},
-        "bakery": {"title": "🥖 Хлеб и выпечка", "items": {}},
-        "other": {"title": "📦 Прочее", "items": {}}
+    # Шаблонные категории для магазина
+    shop_categories = {
+        "protein": {"title": "🥩 Белок:", "items": {}},
+        "garnish": {"title": "🍚 Гарнир:", "items": {}},
+        "greens": {"title": "🌿 Зелень:", "items": {}},
+        "dairy": {"title": "🥛 Молочка:", "items": {}},
+        "vegetables": {"title": "🥦 Овощи:", "items": {}},
+        "nuts": {"title": "🌰 Орехи:", "items": {}},
+        "bakery": {"title": "🥖 Хлеб:", "items": {}},
+        "other": {"title": "📦 Прочее:", "items": {}}
     }
 
-    pantry_items: Dict[str, Dict] = {}
+    # Шаблонные категории для того, что дома
+    pantry_categories = {
+        "oil": {"title": "🧈 Масло:", "items": {}},
+        "bakery": {"title": "🌾 Мука:", "items": {}},
+        "spices": {"title": "🧂 Приправа:", "items": {}},
+        "other": {"title": "📦 Прочее:", "items": {}}
+    }
 
     for dish in dishes:
         for ing in dish.get("ingredients", []):
@@ -660,31 +684,45 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
             cat = ing.get("category", "other")
             is_pantry = ing.get("is_pantry", False)
 
-            target_dict = pantry_items if is_pantry else categories.get(cat, categories["other"])["items"]
-
-            if name in target_dict:
-                if isinstance(amount, (int, float)):
-                    target_dict[name]["amount"] += amount
+            if is_pantry:
+                target_cat = pantry_categories.get(cat, pantry_categories["other"])["items"]
             else:
-                target_dict[name] = {"amount": amount, "unit": unit}
+                target_cat = shop_categories.get(cat, shop_categories["other"])["items"]
 
-    res = f"🛒 **Список покупок ({len(dishes)} бл., {persons} чел.)**\n\n"
+            if name in target_cat:
+                if isinstance(amount, (int, float)):
+                    target_cat[name]["amount"] += amount
+            else:
+                target_cat[name] = {"amount": amount, "unit": unit}
 
-    for cat_key, cat_data in categories.items():
+    res = f"🛒 Список покупок ({dinners_count} бл., {persons} чел.)\n\n"
+
+    # Вывод магазина
+    for cat_key, cat_data in shop_categories.items():
         if cat_data["items"]:
-            res += f"{cat_data['title']}:\n"
-            for name, info in cat_data["items"].items():
+            res += f"{cat_data['title']}\n"
+            for name, info in cat_data['items'].items():
                 amt = info["amount"]
                 amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
                 res += f"• {name} — {amt_str} {info['unit']}\n"
             res += "\n"
 
-    if pantry_items:
-        res += "🏠 **Обычно есть дома:**\n"
-        for name, info in pantry_items.items():
-            amt = info["amount"]
-            amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
-            res += f"• {name} — {amt_str} {info['unit']}\n"
+    res += "🏠 Скорее всего есть у вас дома:\n\n"
+
+    # Вывод домашнего запаса
+    for cat_key, cat_data in pantry_categories.items():
+        if cat_data["items"]:
+            res += f"{cat_data['title']}\n"
+            for name, info in cat_data['items'].items():
+                amt = info["amount"]
+                amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
+                res += f"• {name} — {amt_str} {info['unit']}\n"
+            res += "\n"
+
+    if estimated_total > 0:
+        res += f"💳 Примерная стоимость корзины покупок: {estimated_total} руб."
+    else:
+        res += "💳 Примерная стоимость корзины покупок: Стоимость не рассчитана, список продуктов можно использовать без оценки."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В главное меню 🏠", callback_data="back_main")]
