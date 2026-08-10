@@ -6,3 +6,4 @@ google-genai
 gspread
 oauth2client
 yookassa==3.4.0
+duckduckgo_search
