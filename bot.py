@@ -2,9 +2,9 @@ import asyncio
 import json
 import logging
 import os
-import re
+import urllib.parse
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F, types
@@ -32,12 +32,6 @@ GROQ_API_KEY = os.environ.get(
     "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"
 ).strip()
 
-# API КЛЮЧ SPOONACULAR
-SPOONACULAR_API_KEY = os.environ.get(
-    "SPOONACULAR_API_KEY",
-    "1d01fb14d9ad4aa383a5b95c116b131c"
-).strip()
-
 # ОСНОВНАЯ И РЕЗЕРВНАЯ МОДЕЛИ (Groq)
 groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
@@ -45,7 +39,7 @@ groq_client = AsyncOpenAI(
 )
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# РЕЗЕРВНЫЙ КЛИЕНТ (вторая бесплатная модель Groq для подстраховки при лимитах)
+# РЕЗЕРВНЫЙ КЛИЕНТ (вторая модель Groq для подстраховки)
 reserve_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
@@ -99,102 +93,23 @@ def check_access(user_id: int) -> bool:
     return USERS_DB.get(user_id, {}).get("is_full", True)
 
 
-async def fetch_recipe_from_api(dish_name: str, persons: int) -> dict:
-    """Запрашивает структурированный рецепт, картинку и цены из базы данных Spoonacular API."""
-    if not SPOONACULAR_API_KEY or SPOONACULAR_API_KEY == "YOUR_SPOONACULAR_API_KEY":
-        logging.warning("SPOONACULAR_API_KEY не задан.")
-        return {}
-
-    url = "https://api.spoonacular.com/recipes/complexSearch"
-
-    params = {
-        "apiKey": str(SPOONACULAR_API_KEY),
-        "query": str(dish_name),
-        "number": "1",
-        "addRecipeInformation": "true",
-        "fillIngredients": "true",
-        "language": "ru"
-    }
-
+# -------------------------------------------------------------------
+# ПОИСК КАРТИНОК ЧЕРЕЗ THEMEALDB API
+# -------------------------------------------------------------------
+async def fetch_dish_image(dish_name: str) -> str:
+    """Ищет картинку блюда через бесплатный каталог TheMealDB API."""
+    url = f"https://www.themealdb.com/api/json/v1/1/search.php?s={urllib.parse.quote(dish_name)}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
+            async with session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    results = data.get("results", [])
-                    if results:
-                        r = results[0]
-                        title = r.get("title", dish_name)
-                        ready_in_minutes = r.get("readyInMinutes", 30)
-                        image_url = r.get("image", "")
-                        
-                        instructions_list = []
-                        analyzed_instructions = r.get("analyzedInstructions", [])
-                        if analyzed_instructions:
-                            steps = analyzed_instructions[0].get("steps", [])
-                            for step in steps:
-                                num = step.get("number", 1)
-                                text = step.get("step", "")
-                                instructions_list.append(f"{num}. [⏱ {ready_in_minutes // max(len(steps), 1)} мин] {text}")
-                        
-                        if not instructions_list:
-                            instructions_list = ["1. [⏱ 30 мин] Готовить согласно классической технологии."]
-
-                        ingredients_list = []
-                        total_price = 0
-                        servings_base = r.get("servings", 2) or 2
-
-                        for ing in r.get("extendedIngredients", []):
-                            name = ing.get("name", "Продукт")
-                            amount = ing.get("amount", 1)
-                            adjusted_amount = round(amount * (persons / servings_base), 1)
-                            unit = ing.get("unit", "шт")
-                            aisle = ing.get("aisle", "").lower()
-                            
-                            category = "other"
-                            is_pantry = False
-                            
-                            if any(w in aisle for w in ["meat", "seafood", "produce", "мясо", "рыба"]):
-                                category = "protein"
-                            elif any(w in aisle for w in ["pasta", "rice", "cereal", "крупы", "макароны"]):
-                                category = "garnish"
-                            elif any(w in aisle for w in ["milk", "cheese", "dairy", "молочные"]):
-                                category = "dairy"
-                            elif any(w in aisle for w in ["vegetable", "fruit", "овощи", "фрукты"]):
-                                category = "vegetables"
-                            elif any(w in aisle for w in ["oil", "spice", "baking", "масла", "специи"]):
-                                category = "pantry"
-                                is_pantry = True
-
-                            est_price = max(int(adjusted_amount * 20), 35)
-                            if is_pantry:
-                                est_price = 0
-
-                            total_price += est_price
-
-                            ingredients_list.append({
-                                "name": name,
-                                "amount": adjusted_amount,
-                                "unit": unit if unit else "шт",
-                                "category": category,
-                                "is_pantry": is_pantry,
-                                "estimated_price_rub": est_price
-                            })
-
-                        return {
-                            "title": title,
-                            "cooking_time": f"{ready_in_minutes} мин",
-                            "equipment": "Плита, духовка",
-                            "serving": "Подавать в теплом виде",
-                            "instructions": instructions_list,
-                            "ingredients": ingredients_list,
-                            "recipe_price": total_price if total_price > 0 else 400,
-                            "image_url": image_url
-                        }
+                    meals = data.get("meals")
+                    if meals and meals[0].get("strMealThumb"):
+                        return meals[0]["strMealThumb"]
     except Exception as e:
-        logging.error(f"Ошибка запроса к Spoonacular API: {e}")
-
-    return {}
+        logging.error(f"Ошибка получения картинки для {dish_name}: {e}")
+    return ""
 
 
 # -------------------------------------------------------------------
@@ -281,109 +196,88 @@ async def sub_active_alert(call: types.CallbackQuery):
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ МЕНЮ С АВТО-ПЕРЕКЛЮЧЕНИЕМ (Groq 70b -> Groq 8b)
+# ГЕНЕРАЦИЯ МЕНЮ ЧЕРЕЗ GROQ (С РЕЗЕРВОМ)
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool,
                              budget: int) -> dict:
     veg_status = "Только вегетарианские блюда!" if vegetarian else "Разнообразные блюда."
     cal_status = "Каждое блюдо до 600 ккал." if low_calories else ""
     soup_status = "Разрешены супы и салаты." if soup_salad else ""
-    budget_status = f"Бюджет: {budget} руб." if budget > 0 else ""
+    budget_status = f"Бюджет на все меню: до {budget} руб." if budget > 0 else ""
 
-    prompt_list = f"""
-    Ты шеф-повар. Предложи список из {dinners} РАЗНЫХ названий популярных ужинов для {persons} человек.
+    prompt = f"""
+    Ты профессиональный шеф-повар. Составь меню из {dinners} уникальных ужинов для {persons} человек.
     {veg_status} {cal_status} {soup_status} {budget_status}
-    Верни ответ СТРОГО в формате JSON с ключом "dish_names" (список строк).
+
+    Верни ответ СТРОГО в формате JSON со следующей структурой:
+    {{
+      "estimated_total_rub": 2500,
+      "dishes": [
+        {{
+          "title": "Название блюда (на русском)",
+          "cooking_time": "30 мин",
+          "equipment": "Сковорода, плита",
+          "serving": "Подавать в горячем виде со свежей зеленью",
+          "instructions": [
+            "1. [⏱ 10 мин] Первый шаг приготовления...",
+            "2. [⏱ 20 мин] Второй шаг приготовления..."
+          ],
+          "ingredients": [
+            {{
+              "name": "Куриное филе",
+              "amount": 500,
+              "unit": "г",
+              "category": "protein",
+              "is_pantry": false,
+              "estimated_price_rub": 350
+            }}
+          ],
+          "recipe_price": 600
+        }}
+      ]
+    }}
+    Категории ингредиентов (поле category): "protein", "garnish", "dairy", "vegetables", "pantry", "other".
+    Если продукт базовый (соль, перец, растительное масло), ставь "is_pantry": true и "estimated_price_rub": 0.
     """
-    
-    dish_names = []
+
     try:
-        res_list = await groq_client.chat.completions.create(
+        response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt_list}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
-        dish_names = json.loads(res_list.choices[0].message.content).get("dish_names", [])
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
         logging.warning(f"Основная модель Groq недоступна ({e}), переключаемся на резервную Llama-3.1-8b...")
         try:
             response = await reserve_client.chat.completions.create(
                 model=RESERVE_MODEL,
                 response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt_list}],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7
             )
-            dish_names = json.loads(response.choices[0].message.content).get("dish_names", [])
+            return json.loads(response.choices[0].message.content)
         except Exception as ex:
             logging.error(f"Резервная модель Groq тоже выдала ошибку: {ex}")
-
-    if not dish_names:
-        dish_names = ["Паста с курицей и грибами", "Овощное рагу", "Запеченная рыба с гарниром", "Куриный суп"][:dinners]
-
-    dishes = []
-    total_rub = 0
-
-    for name in dish_names:
-        dish_data = await fetch_recipe_from_api(name, persons)
-
-        if not dish_data:
-            prompt_dish = f"""
-            Ты шеф-повар. Оформи рецепт для блюда "{name}" на {persons} человек.
-            Верни ответ СТРОГО в формате JSON:
-            {{
-              "title": "{name}",
-              "cooking_time": "30 мин",
-              "equipment": "Сковорода",
-              "serving": "Подача",
-              "instructions": ["1. [⏱ 7 мин] Шаг...", "2. [⏱ 4 мин] Шаг..."],
-              "ingredients": [
-                {{
-                  "name": "Продукт", 
-                  "amount": 200, 
-                  "unit": "г", 
-                  "category": "protein", 
-                  "is_pantry": false, 
-                  "estimated_price_rub": 150
-                }}
-              ],
-              "recipe_price": 500,
-              "image_url": ""
-            }}
-            Категории ингредиентов (поле category): "protein", "garnish", "dairy", "vegetables", "pantry", "other".
-            """
-            try:
-                resp = await groq_client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    response_format={"type": "json_object"},
-                    messages=[{"role": "user", "content": prompt_dish}],
-                    temperature=0.3
-                )
-                dish_data = json.loads(resp.choices[0].message.content)
-            except Exception:
-                try:
-                    response = await reserve_client.chat.completions.create(
-                        model=RESERVE_MODEL,
-                        response_format={"type": "json_object"},
-                        messages=[{"role": "user", "content": prompt_dish}],
-                        temperature=0.3
-                    )
-                    dish_data = json.loads(response.choices[0].message.content)
-                except Exception as e:
-                    logging.error(f"Ошибка резервной генерации для {name}: {e}")
-                    continue
-
-        dishes.append(dish_data)
-        total_rub += dish_data.get("recipe_price", 400)
-
-    return {
-        "estimated_total_rub": total_rub if total_rub > 0 else 2500,
-        "dishes": dishes
-    }
+            return {
+                "estimated_total_rub": 2000,
+                "dishes": [
+                    {
+                        "title": "Паста с томатным соусом",
+                        "cooking_time": "20 мин",
+                        "equipment": "Кастрюля, сковорода",
+                        "serving": "Подавать теплой",
+                        "instructions": ["1. [⏱ 10 мин] Отварить макароны.", "2. [⏱ 10 мин] Обжарить с соусом."],
+                        "ingredients": [{"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100}],
+                        "recipe_price": 300
+                    }
+                ]
+            }
 
 
 async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
-    prompt = f'Замени "{old_ingredient}" в блюде "{dish["title"]}" на аналог, сохранив оригинальные шаги и тайминги. Верни JSON с полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price, image_url.'
+    prompt = f'Замени ингредиент "{old_ingredient}" в блюде "{dish["title"]}" на подходящий аналог, сохранив структуру рецепта. Верни точно такой же JSON-объект блюда со всеми полями (title, cooking_time, equipment, serving, instructions, ingredients, recipe_price).'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -407,7 +301,8 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
 
 
 async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
-    prompt = f'Предложи 3 альтернативы взамен "{old_dish_title}" для {persons} чел. Верни JSON с ключом "options" (список блюд в том же формате что и рецепты).'
+    veg_text = "Вегетарианское." if vegetarian else ""
+    prompt = f'Предложи 3 альтернативных блюда взамен "{old_dish_title}" для {persons} человек. {veg_text} Верни JSON с ключом "options" — списком объектов блюд в том же формате, что и основной рецепт.'
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -455,10 +350,7 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await state.update_data(persons=1, dinners=4, vegetarian=False, low_calories=False, soup_salad=True, budget=2500)
-    welcome_text = (
-        "👨‍🍳 **Шеф-Повар Бот**\n\n"
-        "Добро пожаловать!"
-    )
+    welcome_text = "👨‍🍳 **Шеф-Повар Бот**\n\nДобро пожаловать! Настройте параметры и сгенерируйте персональное меню."
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard(user_id))
 
 
@@ -603,7 +495,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
             parse_mode="Markdown", reply_markup=main_keyboard(user_id))
         return
 
-    await call.answer("Загружаю рецепты из базы данных API...")
+    await call.answer("Генерирую персональное меню и ищу картинки...")
     data = await state.get_data()
 
     ai_data = await generate_groq_menu(
@@ -628,9 +520,10 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     for idx, dish in enumerate(dishes):
         title = dish['title']
         summary_text += f"**{idx + 1}.** {title}\n"
-
-        image_url = dish.get("image_url")
         caption = format_dish_text(dish, idx, data.get("persons", 1))
+
+        # Ищем картинку блюда через TheMealDB
+        image_url = await fetch_dish_image(title)
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -645,6 +538,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
                 continue
             except Exception:
                 pass
+
         await call.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
     kb_final = InlineKeyboardMarkup(inline_keyboard=[
