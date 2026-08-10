@@ -24,12 +24,12 @@ from yookassa import Configuration, Payment
 # -------------------------------------------------------------------
 BOT_TOKEN = os.environ.get(
     "BOT_TOKEN",
-    "8636610453:AAEvJuNb05_P5ALrXmebu58Q0I6zkN7-Fn4"
+    ""
 ).strip()
 
 GROQ_API_KEY = os.environ.get(
     "GROQ_API_KEY",
-    "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"
+    ""
 ).strip()
 
 # ОСНОВНАЯ И РЕЗЕРВНАЯ МОДЕЛИ (Groq)
