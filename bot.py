@@ -141,21 +141,22 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
 
 
 # -------------------------------------------------------------------
-# ЗАПРОСЫ К GROQ (РАЗНООБРАЗНЫЕ И ПОДРОБНЫЕ РЕЦЕПТЫ)
+# ЗАПРОСЫ К GROQ (ТОЧНОЕ ВРЕМЯ НА КАЖДОМ ШАГЕ)
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> dict:
     veg_status = "Только вегетарианские блюда (без мяса, птицы, рыбы)!" if vegetarian else "Разнообразные блюда (мясо, птица, рыба, овощи)."
 
     prompt = f"""
-    Ты шеф-повар. Сгенерируй {dinners} РАЗНЫХ и УНИКАЛЬНЫХ ужинов для {persons} человек.
+    Ты профессиональный шеф-повар. Сгенерируй {dinners} РАЗНЫХ и УНИКАЛЬНЫХ ужинов для {persons} человек.
     Предпочтения: {veg_status}
 
-    ТРЕБОВАНИЯ:
-    1. Каждое блюдо должно быть уникальным, не повторяй одинаковые рецепты!
-    2. Все рецепты ДОЛЖНЫ БЫТЬ ПОДРОБНЫМИ и содержать:
-       - Пошаговую инструкцию из 6-10 детальных шагов;
-       - Список используемого оборудования;
-       - Рекомендации по подаче.
+    КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ К ИНСТРУКЦИИ:
+    1. Каждое блюдо должно содержать подробную пошаговую инструкцию (6-10 шагов).
+    2. НА КАЖДОМ ШАГЕ ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ТОЧНОЕ ВРЕМЯ (сколько минут резать, сколько минут варить, обжаривать, запекать, тушить и т.д.).
+       Формат каждого шага должен быть строго с таймингом, например:
+       "1. [⏱ 5 мин] Нарезка: нашинкуйте лук кубиками, а морковь натрите на крупной терке."
+       "2. [⏱ 7 мин] Обжарка: разогрейте сковороду и обжаривайте лук с морковью на среднем огне до золотистого цвета."
+       "3. [⏱ 15 мин] Варка: добавьте бульон, доведите до кипения и варите на медленном огне."
     3. Ингредиенты рассчитывай строго на {persons} чел.
 
     Верни ответ СТРОГО в формате JSON:
@@ -164,13 +165,13 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
       "dishes": [
         {{
           "title": "Название блюда",
-          "cooking_time": "25 мин",
-          "equipment": "Сковорода, доска, нож",
-          "serving": "Свежая зелень, лимон",
+          "cooking_time": "30 мин",
+          "equipment": "Сковорода, кастрюля, разделочная доска, нож",
+          "serving": "Украсьте свежей зеленью и подавайте с долькой лимона",
           "instructions": [
-            "1. Подробный шаг 1...",
-            "2. Подробный шаг 2...",
-            "3. Подробный шаг 3..."
+            "1. [⏱ 5 мин] Подготовка и нарезка: ...",
+            "2. [⏱ 8 мин] Обжарка: ...",
+            "3. [⏱ 15 мин] Варка/Тушение: ..."
           ],
           "ingredients": [
             {{
@@ -192,10 +193,10 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool) -> di
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a professional chef. Always output valid JSON with detailed recipes."},
+                {"role": "system", "content": "You are a professional chef. Always output valid JSON with exact time for each cooking step."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.8
+            temperature=0.7
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -208,6 +209,9 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
     Блюдо: "{dish['title']}".
     Замени ингредиент "{old_ingredient}" на подходящий аналог.
     Обнови подробно список ингредиентов и пошаговую инструкцию.
+    
+    ТРЕБОВАНИЕ: В пошаговой инструкции на КАЖДОМ шаге указывай точное время (сколько минут резать, варить, жарить и т.д.) в формате:
+    "1. [⏱ 5 мин] Текст шага..."
 
     Верни ответ строго в формате JSON с полями: title, cooking_time, equipment, serving, instructions (массив строк), ingredients (массив объектов).
     """
@@ -217,7 +221,7 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a professional chef assistant returning valid JSON."},
+                {"role": "system", "content": "You are a professional chef assistant returning valid JSON with step-by-step timing."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7
@@ -233,15 +237,17 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
 
     prompt = f"""
     Предложи 3 альтернативных подробных блюда взамен "{old_dish_title}" для {persons} чел. ({veg_status}).
+    В пошаговой инструкции КАЖДЫЙ шаг обязан содержать точное время (сколько резать, жарить, варить).
+    
     Верни ответ строго в формате JSON:
     {{
       "options": [
         {{
           "title": "Название блюда",
-          "cooking_time": "20 мин",
-          "equipment": "Плита, сковорода",
-          "serving": "Зелень",
-          "instructions": ["1. Шаг 1...", "2. Шаг 2..."],
+          "cooking_time": "25 мин",
+          "equipment": "Плита, сковорода, доска",
+          "serving": "Зелень, соус",
+          "instructions": ["1. [⏱ 5 мин] Нарезка...", "2. [⏱ 10 мин] Обжарка..."],
           "ingredients": [
             {{"name": "Ингредиент", "amount": 100, "unit": "г", "category": "protein", "is_pantry": false, "estimated_price_rub": 100}}
           ]
@@ -255,7 +261,7 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
             model=GROQ_MODEL,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": "You are a professional chef returning valid JSON."},
+                {"role": "system", "content": "You are a professional chef returning valid JSON with step timing."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.8
@@ -284,10 +290,10 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
 
     text = (
         f"🍳 **{title.upper()}**\n"
-        f"⏱ {time_str} | 👤 На {persons} чел.\n\n"
+        f"⏱ Общее время: {time_str} | 👤 На {persons} чел.\n\n"
         f"🛒 **Ингредиенты:**\n{ing_str}\n\n"
         f"🛠 **Оборудование:** {equipment}\n\n"
-        f"📖 **Инструкция:**\n{inst_str}\n\n"
+        f"📖 **Пошаговая инструкция:**\n{inst_str}\n\n"
         f"🥗 **Подача:** {serving}"
     )
     return text
@@ -301,7 +307,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.update_data(persons=2, dinners=4, vegetarian=False)
     welcome_text = (
         "🤖 **Шеф-Повар Бот** 👨‍🍳🍝\n\n"
-        "Я составляю разнообразное меню с подробными рецептами и генерирую фото каждого блюда!"
+        "Я составляю меню с **точным таймингом каждого шага** (сколько резать, жарить, варить) и генерирую фото блюд!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -313,7 +319,7 @@ async def cmd_help(message: types.Message):
         "/start — Главное меню\n"
         "/menu — Посмотреть текущий рацион\n"
         "/help — Справка\n\n"
-        "Нажмите **«Новая подборка»**, чтобы сгенерировать новое меню с фото!"
+        "Нажмите **«Новая подборка»**, чтобы сгенерировать новое меню с точным временем готовки!"
     )
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -393,7 +399,7 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
     dinners_count = data.get("dinners", 4)
     vegetarian = data.get("vegetarian", False)
 
-    await call.message.answer("👨‍🍳 **Составляю новое меню и генерирую фото через YandexART...**")
+    await call.message.answer("👨‍🍳 **Составляю подробные рецепты с таймингом шагов и генерирую фото...**")
 
     ai_data = await generate_groq_menu(persons, dinners_count, vegetarian)
     dishes = ai_data.get("dishes", [])
@@ -642,7 +648,7 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
             res += "\n"
 
     if pantry_items:
-        res += "🏠 **Ообычно есть дома:**\n"
+        res += "🏠 **Обычно есть дома:**\n"
         for name, info in pantry_items.items():
             amt = info["amount"]
             amt_str = f"{amt:.1f}".rstrip('0').rstrip('.') if isinstance(amt, float) else str(amt)
