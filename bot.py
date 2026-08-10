@@ -40,7 +40,7 @@ YANDEX_CLOUD_FOLDER = os.environ.get(
 
 YANDEX_CLOUD_API_KEY = os.environ.get(
     "YANDEX_CLOUD_API_KEY", 
-    "AQVNwj_6nJEIkW5YolgbZDXjgHueyVJStGtpcMX-"
+    "123"
 ).strip()
 
 # НАСТРОЙКИ ЮKASSA
@@ -82,6 +82,7 @@ def main_keyboard(user_id: int):
 
     kb = [
         [InlineKeyboardButton(text="Новая подборка ✨", callback_data="new_selection")],
+        [InlineKeyboardButton(text="Список покупок 🛒", callback_data="get_shopping_list")],
         [InlineKeyboardButton(text="Настроить фильтрацию ⚙️", callback_data="settings")]
     ]
 
@@ -196,7 +197,6 @@ async def generate_yandex_art_bytes(dish_name_ru: str) -> Optional[bytes]:
     )
 
     try:
-        # Инициализируем клиент под новый эндпоинт Яндекса
         yandex_openai_client = AsyncOpenAI(
             api_key=YANDEX_CLOUD_API_KEY,
             base_url="https://ai.api.cloud.yandex.net/v1",
@@ -247,11 +247,26 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
           "serving": "Подача",
           "instructions": ["1. [⏱ 5 мин] Шаг..."],
           "ingredients": [
-            {{"name": "Продукт", "amount": 200, "unit": "г", "category": "protein", "is_pantry": false, "estimated_price_rub": 150}}
+            {{
+              "name": "Продукт", 
+              "amount": 200, 
+              "unit": "г", 
+              "category": "protein", 
+              "is_pantry": false, 
+              "estimated_price_rub": 150
+            }}
           ]
         }}
       ]
     }}
+    Примечания для категорий ингредиентов (поле category):
+    - "protein" (🥩 Белок: мясо, рыба, фарш, птица)
+    - "garnish" (🍚 Гарнир: крупы, макароны, картофель)
+    - "dairy" (🥛 Молочка: молоко, сметана, сыр, творог)
+    - "vegetables" (🥦 Овощи и зелень: лук, морковь, томаты, зелень)
+    - "pantry" (🧈 Масло и приправы: растительное масло, соль, перец)
+    - "other" (📦 Прочее: соусы, вода, лимонный сок и т.д.)
+    Поле is_pantry ставь true для масел, соли, специй и базовых приправ, которые обычно есть дома, и false для остальных.
     """
     try:
         response = await groq_client.chat.completions.create(
@@ -348,6 +363,13 @@ async def cmd_menu(message: types.Message, state: FSMContext):
     for idx, dish in enumerate(dishes, 1):
         text += f"**{idx}. {dish['title']}**\n"
     await message.answer(text, parse_mode="Markdown")
+
+
+@dp.callback_query(F.data == "main_menu")
+async def back_to_main_menu(call: types.CallbackQuery):
+    await call.answer()
+    user_id = call.from_user.id
+    await call.message.answer("🏠 **Главное меню:**", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
 
 
 @dp.callback_query(F.data == "settings")
@@ -486,7 +508,8 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
 
     kb_final = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Список покупок 🛒", callback_data="get_shopping_list"),
-         InlineKeyboardButton(text="Пересоздать меню 🔄", callback_data="new_selection")]
+         InlineKeyboardButton(text="Пересоздать меню 🔄", callback_data="new_selection")],
+        [InlineKeyboardButton(text="В главное меню 🏠", callback_data="main_menu")]
     ])
     await call.message.answer(summary_text, parse_mode="Markdown", reply_markup=kb_final)
 
@@ -585,14 +608,51 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("⚠️ Сначала сгенерируйте подборку!")
         return
 
-    shop_categories = {"protein": {"title": "🥩 Белок:", "items": {}}, "garnish": {"title": "🍚 Гарнир:", "items": {}}, "vegetables": {"title": "🥦 Овощи:", "items": {}}, "other": {"title": "📦 Прочее:", "items": {}}}
+    dinners_count = len(dishes)
+    persons_count = data.get("persons", 1)
+    total_rub = data.get("estimated_total_rub", 0)
+
+    # Категории для магазина
+    shop_categories = {
+        "protein": {"title": "🥩 Белок:", "items": {}},
+        "garnish": {"title": "🍚 Гарнир:", "items": {}},
+        "dairy": {"title": "🥛 Молочка:", "items": {}},
+        "vegetables": {"title": "🥦 Овощи:", "items": {}},
+        "other": {"title": "📦 Прочее:", "items": {}}
+    }
+
+    # Отдельная секция «Скорее всего есть у вас дома»
+    pantry_categories = {
+        "oil": {"title": "🧈 Масло:", "items": {}},
+        "spices": {"title": "🧂 Приправа:", "items": {}},
+        "other_pantry": {"title": "📦 Прочее дома:", "items": {}}
+    }
+
     for dish in dishes:
         for ing in dish.get("ingredients", []):
             name = ing["name"].capitalize()
+            amount = ing.get("amount", 0)
+            unit = ing.get("unit", "")
+            is_pantry = ing.get("is_pantry", False)
             cat = ing.get("category", "other")
-            shop_categories.get(cat, shop_categories["other"])["items"][name] = {"amount": ing.get("amount", 0), "unit": ing.get("unit", "")}
 
-    res = "🛒 **Список покупок:**\n\n"
+            if is_pantry:
+                if "масло" in name.lower():
+                    target_dict = pantry_categories["oil"]["items"]
+                elif "перец" in name.lower() or "соль" in name.lower() or "приправ" in name.lower():
+                    target_dict = pantry_categories["spices"]["items"]
+                else:
+                    target_dict = pantry_categories["other_pantry"]["items"]
+            else:
+                target_dict = shop_categories.get(cat, shop_categories["other"])["items"]
+
+            if name in target_dict:
+                target_dict[name]["amount"] += amount
+            else:
+                target_dict[name] = {"amount": amount, "unit": unit}
+
+    res = f"🛒 Список покупок ({dinners_count} бл., {persons_count} чел.)\n\n"
+
     for cat_data in shop_categories.values():
         if cat_data["items"]:
             res += f"{cat_data['title']}\n"
@@ -600,7 +660,24 @@ async def shopping_list(call: types.CallbackQuery, state: FSMContext):
                 res += f"• {name} — {info['amount']} {info['unit']}\n"
             res += "\n"
 
-    await call.message.answer(res, parse_mode="Markdown")
+    # Добавляем блок «Скорее всего есть у вас дома» если там есть элементы
+    has_pantry_items = any(cat["items"] for cat in pantry_categories.values())
+    if has_pantry_items:
+        res += "🏠 Скорее всего есть у вас дома:\n\n"
+        for cat_data in pantry_categories.values():
+            if cat_data["items"]:
+                res += f"{cat_data['title']}\n"
+                for name, info in cat_data['items'].items():
+                    res += f"• {name} — {info['amount']} {info['unit']}\n"
+                res += "\n"
+
+    res += f"💳 Примерная стоимость корзины покупок: {total_rub} руб."
+
+    kb_shop = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="В главное меню 🏠", callback_data="main_menu")]
+    ])
+
+    await call.message.answer(res, parse_mode="Markdown", reply_markup=kb_shop)
 
 
 async def handle_ping(request):
