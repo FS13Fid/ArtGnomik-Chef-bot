@@ -97,6 +97,18 @@ def check_access(user_id: int) -> bool:
     return USERS_DB.get(user_id, {}).get("is_full", True)
 
 
+def clean_json_content(content: str) -> str:
+    """Очищает ответ модели от markdown-оберток."""
+    content = content.strip()
+    if content.startswith("```json"):
+        content = content[7:]
+    elif content.startswith("```"):
+        content = content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+    return content.strip()
+
+
 # -------------------------------------------------------------------
 # ГЕНЕРАЦИЯ КАРТИНОК ЧЕРЕЗ YANDEX ART
 # -------------------------------------------------------------------
@@ -138,7 +150,7 @@ async def process_buy_subscription(call: types.CallbackQuery):
             },
             "confirmation": {
                 "type": "redirect",
-                "return_url": f"https://t.me/{(await bot.get_me()).username}"
+                "return_url": f"[https://t.me/](https://t.me/){(await bot.get_me()).username}"
             },
             "capture": True,
             "description": f"Покупка полного доступа к боту (User ID: {user_id})",
@@ -218,7 +230,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     Ты профессиональный шеф-повар. Составь меню из {dinners} уникальных ужинов для {persons} человек.
     {veg_status} {cal_status} {soup_status} {budget_status}
 
-    ВНИМАНИЕ К ИНГРЕДИЕНТАМ: Для КАЖДОГО ингредиента (включая соль, масло, перец, специи) обязательно укажи реальное числовое количество в поле "amount" (например, 5, 10, 50) и единицу измерения в поле "unit" (например, "г", "мл", "ч. л."), а также их ориентировочную стоимость в "estimated_price_rub" (для базовых продуктов вроде соли ставь цену 0, но количество в граммах/мл все равно пиши обязательно, например 10 г).
+    ВНИМАНИЕ К ИНГРЕДИЕНТАМ: Для КАЖДОГО ингредиента (включая соль, масло, перец, специи) обязательно укажи реальное числовое количество в поле "amount" (например, 5, 10, 50) и единицу измерения в поле "unit" (например, "г", "мл", "ч. л."), а также их ориентировочную стоимость в "estimated_price_rub" (для базовых продуктов вроде соли ставь цену 0, но количество в граммах/мл пиши обязательно).
 
     Верни ответ СТРОГО в формате JSON со следующей структурой:
     {{
@@ -241,14 +253,6 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
               "category": "protein",
               "is_pantry": false,
               "estimated_price_rub": 350
-            }},
-            {{
-              "name": "Подсолнечное масло",
-              "amount": 30,
-              "unit": "мл",
-              "category": "other",
-              "is_pantry": true,
-              "estimated_price_rub": 0
             }}
           ],
           "recipe_price": 600
@@ -266,11 +270,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7
             )
-            content = response.choices[0].message.content.strip()
-            if content.startswith("```json"):
-                content = content[7:-3].strip()
-            elif content.startswith("```"):
-                content = content[3:-3].strip()
+            content = clean_json_content(response.choices[0].message.content)
             return json.loads(content)
         except Exception as e:
             logging.warning(f"Ошибка с моделью {model}: {e}")
@@ -285,10 +285,7 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
                 "equipment": "Кастрюля, сковорода",
                 "serving": "Подавать теплой",
                 "instructions": ["1. [⏱ 10 мин] Отварить макароны.", "2. [⏱ 10 мин] Обжарить с соусом."],
-                "ingredients": [
-                    {"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100},
-                    {"name": "Соль", "amount": 5, "unit": "г", "category": "other", "is_pantry": True, "estimated_price_rub": 0}
-                ],
+                "ingredients": [{"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100}],
                 "recipe_price": 300
             }
         ]
@@ -296,7 +293,11 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
 
 
 async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
-    prompt = f'Замени ингредиент "{old_ingredient}" в блюде "{dish["title"]}" на подходящий аналог, сохранив структуру рецепта. Верни СТРОГО валидный JSON-объект блюда без форматирования в маркдаун, со всеми полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.'
+    prompt = f"""
+    Замени ингредиент "{old_ingredient}" в блюде "{dish['title']}" на подходящий аналог, сохранив структуру рецепта.
+    Верни СТРОГО валидный JSON-объект блюда со всеми полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.
+    Структура ingredients внутри должна быть списком объектов с полями: name, amount, unit, category, is_pantry, estimated_price_rub.
+    """
     
     for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
         try:
@@ -306,11 +307,7 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
-            content = response.choices[0].message.content.strip()
-            if content.startswith("```json"):
-                content = content[7:-3].strip()
-            elif content.startswith("```"):
-                content = content[3:-3].strip()
+            content = clean_json_content(response.choices[0].message.content)
             return json.loads(content)
         except Exception as e:
             logging.warning(f"Ошибка замены ингредиента с моделью {model}: {e}")
@@ -320,7 +317,10 @@ async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
 
 async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
     veg_text = "Вегетарианское." if vegetarian else ""
-    prompt = f'Предложи 3 альтернативных блюда взамен "{old_dish_title}" для {persons} человек. {veg_text} Верни СТРОГО валидный JSON без маркдаун-оберток с ключом "options" — списком объектов блюд в том же формате, что и основной рецепт.'
+    prompt = f"""
+    Предложи 3 альтернативных блюда взамен "{old_dish_title}" для {persons} человек. {veg_text} 
+    Верни СТРОГО валидный JSON с ключом "options", содержащим список объектов блюд. Каждый объект должен содержать поля: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.
+    """
     
     for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
         try:
@@ -330,11 +330,7 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.5
             )
-            content = response.choices[0].message.content.strip()
-            if content.startswith("```json"):
-                content = content[7:-3].strip()
-            elif content.startswith("```"):
-                content = content[3:-3].strip()
+            content = clean_json_content(response.choices[0].message.content)
             data = json.loads(content)
             return data.get("options", [])
         except Exception as e:
@@ -348,7 +344,7 @@ def format_dish_text(dish: dict, idx: int, persons: int) -> str:
     time_str = dish.get("cooking_time", "15 мин")
     equipment = dish.get("equipment", "Плита")
     serving = dish.get("serving", "По вкусу")
-    ing_str = "\n".join([f"• {i['name']} — {i['amount']} {i['unit']}" for i in dish.get("ingredients", [])])
+    ing_str = "\n".join([f"• {i['name']} — {i.get('amount', 0)} {i.get('unit', '')}" for i in dish.get("ingredients", [])])
     inst_str = "\n".join(dish.get("instructions", []))
 
     return (
