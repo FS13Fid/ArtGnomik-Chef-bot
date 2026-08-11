@@ -218,6 +218,8 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     Ты профессиональный шеф-повар. Составь меню из {dinners} уникальных ужинов для {persons} человек.
     {veg_status} {cal_status} {soup_status} {budget_status}
 
+    ВНИМАНИЕ К ИНГРЕДИЕНТАМ: Для КАЖДОГО ингредиента (включая соль, масло, перец, специи) обязательно укажи реальное числовое количество в поле "amount" (например, 5, 10, 50) и единицу измерения в поле "unit" (например, "г", "мл", "ч. л."), а также их ориентировочную стоимость в "estimated_price_rub" (для базовых продуктов вроде соли ставь цену 0, но количество в граммах/мл все равно пиши обязательно, например 10 г).
+
     Верни ответ СТРОГО в формате JSON со следующей структурой:
     {{
       "estimated_total_rub": 2500,
@@ -239,6 +241,14 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
               "category": "protein",
               "is_pantry": false,
               "estimated_price_rub": 350
+            }},
+            {{
+              "name": "Подсолнечное масло",
+              "amount": 30,
+              "unit": "мл",
+              "category": "other",
+              "is_pantry": true,
+              "estimated_price_rub": 0
             }}
           ],
           "recipe_price": 600
@@ -246,7 +256,6 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
       ]
     }}
     Категории ингредиентов (поле category): "protein", "garnish", "dairy", "vegetables", "pantry", "other".
-    Если продукт базовый (соль, перец, растительное масло), ставь "is_pantry": true и "estimated_price_rub": 0.
     """
 
     for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
@@ -276,7 +285,10 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
                 "equipment": "Кастрюля, сковорода",
                 "serving": "Подавать теплой",
                 "instructions": ["1. [⏱ 10 мин] Отварить макароны.", "2. [⏱ 10 мин] Обжарить с соусом."],
-                "ingredients": [{"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100}],
+                "ingredients": [
+                    {"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100},
+                    {"name": "Соль", "amount": 5, "unit": "г", "category": "other", "is_pantry": True, "estimated_price_rub": 0}
+                ],
                 "recipe_price": 300
             }
         ]
