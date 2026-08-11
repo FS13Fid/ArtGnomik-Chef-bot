@@ -319,7 +319,29 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
     veg_text = "Вегетарианское." if vegetarian else ""
     prompt = f"""
     Предложи 3 альтернативных блюда взамен "{old_dish_title}" для {persons} человек. {veg_text} 
-    Верни СТРОГО валидный JSON с ключом "options", содержащим список объектов блюд. Каждый объект должен содержать поля: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.
+    Верни СТРОГО валидный JSON-объект следующей структуры:
+    {{
+      "options": [
+        {{
+          "title": "Название блюда",
+          "cooking_time": "20 мин",
+          "equipment": "Сковорода",
+          "serving": "Горячим",
+          "instructions": ["1. Шаг первый", "2. Шаг второй"],
+          "ingredients": [
+            {{
+              "name": "Продукт",
+              "amount": 100,
+              "unit": "г",
+              "category": "protein",
+              "is_pantry": false,
+              "estimated_price_rub": 150
+            }}
+          ],
+          "recipe_price": 300
+        }}
+      ]
+    }}
     """
     
     for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
@@ -332,7 +354,23 @@ async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_
             )
             content = clean_json_content(response.choices[0].message.content)
             data = json.loads(content)
-            return data.get("options", [])
+            
+            raw_options = data.get("options", [])
+            valid_options = []
+            
+            # Проверяем, что каждый элемент является словарём, а не строкой
+            for opt in raw_options:
+                if isinstance(opt, dict) and "title" in opt:
+                    # Дополняем недостающие ключи на всякий случай
+                    opt.setdefault("cooking_time", "20 мин")
+                    opt.setdefault("equipment", "Плита")
+                    opt.setdefault("serving", "Подавать теплым")
+                    opt.setdefault("instructions", ["1. Приготовить блюдо"])
+                    opt.setdefault("ingredients", [])
+                    valid_options.append(opt)
+                    
+            if valid_options:
+                return valid_options
         except Exception as e:
             logging.warning(f"Ошибка генерации замен блюда с моделью {model}: {e}")
             continue
@@ -701,7 +739,14 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
             await call.message.answer("❌ Данные сессии устарели. Сгенерируйте меню заново.")
             return
 
-        dishes[dish_idx] = options[opt_idx]
+        selected_dish = options[opt_idx]
+        
+        # Защита от попадания строки вместо объекта блюда
+        if not isinstance(selected_dish, dict):
+            await call.message.answer("❌ Ошибка формата данных блюда. Попробуйте выбрать другой вариант.")
+            return
+
+        dishes[dish_idx] = selected_dish
         await state.update_data(current_dishes=dishes)
 
         caption = f"✅ **Блюдо заменено!**\n\n" + format_dish_text(dishes[dish_idx], dish_idx, data.get("persons", 1))
@@ -710,7 +755,6 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка при применении замены блюда: {e}")
         await call.message.answer("❌ Не удалось применить замену.")
-
 
 @dp.callback_query(F.data == "get_shopping_list")
 async def shopping_list(call: types.CallbackQuery, state: FSMContext):
