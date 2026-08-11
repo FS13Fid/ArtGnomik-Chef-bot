@@ -105,7 +105,6 @@ async def fetch_dish_image(dish_name: str) -> bytes | None:
     try:
         prompt_text = f"Профессиональная фотография еды: {dish_name}, ресторанная подача, аппетитно, высокая детализация"
         
-        # Запускаем в отдельном потоке, так как клиенты OpenAI синхронные в данном вызове
         def generate_sync():
             img = yandex_openai_client.images.generate(
                 model=f"art://{YANDEX_CLOUD_FOLDER}/{YANDEX_CLOUD_MODEL}",
@@ -206,7 +205,7 @@ async def sub_active_alert(call: types.CallbackQuery):
 
 
 # -------------------------------------------------------------------
-# ГЕНЕРАЦИЯ МЕНЮ ЧЕРЕЗ GROQ (С РЕЗЕРВОМ)
+# ГЕНЕРАЦИЯ МЕНЮ И ЗАМЕНЫ ЧЕРЕЗ GROQ (С РЕЗЕРВОМ И ПАРСИНГОМ)
 # -------------------------------------------------------------------
 async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_calories: bool, soup_salad: bool,
                              budget: int) -> dict:
@@ -250,89 +249,86 @@ async def generate_groq_menu(persons: int, dinners: int, vegetarian: bool, low_c
     Если продукт базовый (соль, перец, растительное масло), ставь "is_pantry": true и "estimated_price_rub": 0.
     """
 
-    try:
-        response = await groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        logging.warning(f"Основная модель Groq недоступна ({e}), переключаемся на резервную Llama-3.1-8b...")
+    for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
         try:
-            response = await reserve_client.chat.completions.create(
-                model=RESERVE_MODEL,
+            response = await client.chat.completions.create(
+                model=model,
                 response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7
             )
-            return json.loads(response.choices[0].message.content)
-        except Exception as ex:
-            logging.error(f"Резервная модель Groq тоже выдала ошибку: {ex}")
-            return {
-                "estimated_total_rub": 2000,
-                "dishes": [
-                    {
-                        "title": "Паста с томатным соусом",
-                        "cooking_time": "20 мин",
-                        "equipment": "Кастрюля, сковорода",
-                        "serving": "Подавать теплой",
-                        "instructions": ["1. [⏱ 10 мин] Отварить макароны.", "2. [⏱ 10 мин] Обжарить с соусом."],
-                        "ingredients": [{"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100}],
-                        "recipe_price": 300
-                    }
-                ]
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```json"):
+                content = content[7:-3].strip()
+            elif content.startswith("```"):
+                content = content[3:-3].strip()
+            return json.loads(content)
+        except Exception as e:
+            logging.warning(f"Ошибка с моделью {model}: {e}")
+            continue
+
+    return {
+        "estimated_total_rub": 2000,
+        "dishes": [
+            {
+                "title": "Паста с томатным соусом",
+                "cooking_time": "20 мин",
+                "equipment": "Кастрюля, сковорода",
+                "serving": "Подавать теплой",
+                "instructions": ["1. [⏱ 10 мин] Отварить макароны.", "2. [⏱ 10 мин] Обжарить с соусом."],
+                "ingredients": [{"name": "Макароны", "amount": 400, "unit": "г", "category": "garnish", "is_pantry": False, "estimated_price_rub": 100}],
+                "recipe_price": 300
             }
+        ]
+    }
 
 
 async def replace_ingredient_in_dish(dish: dict, old_ingredient: str) -> dict:
-    prompt = f'Замени ингредиент "{old_ingredient}" в блюде "{dish["title"]}" на подходящий аналог, сохранив структуру рецепта. Верни точно такой же JSON-объект блюда со всеми полями (title, cooking_time, equipment, serving, instructions, ingredients, recipe_price).'
-    try:
-        response = await groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception:
+    prompt = f'Замени ингредиент "{old_ingredient}" в блюде "{dish["title"]}" на подходящий аналог, сохранив структуру рецепта. Верни СТРОГО валидный JSON-объект блюда без форматирования в маркдаун, со всеми полями: title, cooking_time, equipment, serving, instructions, ingredients, recipe_price.'
+    
+    for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
         try:
-            response = await reserve_client.chat.completions.create(
-                model=RESERVE_MODEL,
+            response = await client.chat.completions.create(
+                model=model,
                 response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
-            return json.loads(response.choices[0].message.content)
-        except Exception:
-            pass
-        return dish
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```json"):
+                content = content[7:-3].strip()
+            elif content.startswith("```"):
+                content = content[3:-3].strip()
+            return json.loads(content)
+        except Exception as e:
+            logging.warning(f"Ошибка замены ингредиента с моделью {model}: {e}")
+            continue
+    return dish
 
 
 async def generate_dish_replacement_options(persons: int, vegetarian: bool, old_dish_title: str) -> list:
     veg_text = "Вегетарианское." if vegetarian else ""
-    prompt = f'Предложи 3 альтернативных блюда взамен "{old_dish_title}" для {persons} человек. {veg_text} Верни JSON с ключом "options" — списком объектов блюд в том же формате, что и основной рецепт.'
-    try:
-        response = await groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
-        )
-        return json.loads(response.choices[0].message.content).get("options", [])
-    except Exception:
+    prompt = f'Предложи 3 альтернативных блюда взамен "{old_dish_title}" для {persons} человек. {veg_text} Верни СТРОГО валидный JSON без маркдаун-оберток с ключом "options" — списком объектов блюд в том же формате, что и основной рецепт.'
+    
+    for client, model in [(groq_client, GROQ_MODEL), (reserve_client, RESERVE_MODEL)]:
         try:
-            response = await reserve_client.chat.completions.create(
-                model=RESERVE_MODEL,
+            response = await client.chat.completions.create(
+                model=model,
                 response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.5
             )
-            return json.loads(response.choices[0].message.content).get("options", [])
-        except Exception:
-            pass
-        return []
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```json"):
+                content = content[7:-3].strip()
+            elif content.startswith("```"):
+                content = content[3:-3].strip()
+            data = json.loads(content)
+            return data.get("options", [])
+        except Exception as e:
+            logging.warning(f"Ошибка генерации замен блюда с моделью {model}: {e}")
+            continue
+    return []
 
 
 def format_dish_text(dish: dict, idx: int, persons: int) -> str:
@@ -532,7 +528,6 @@ async def generate_selection(call: types.CallbackQuery, state: FSMContext):
         summary_text += f"**{idx + 1}.** {title}\n"
         caption = format_dish_text(dish, idx, data.get("persons", 1))
 
-        # Генерируем картинку через Yandex ART
         image_bytes = await fetch_dish_image(title)
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -566,25 +561,46 @@ async def select_ingredient_to_replace(call: types.CallbackQuery, state: FSMCont
         await call.answer("Требуется подписка!", show_alert=True)
         return
     await call.answer()
-    dish_idx = int(call.data.split("_")[-1])
-    data = await state.get_data()
-    dishes = data.get("current_dishes", [])
+    
+    try:
+        dish_idx = int(call.data.split("_")[-1])
+        data = await state.get_data()
+        dishes = data.get("current_dishes", [])
 
-    if not dishes or dish_idx >= len(dishes):
-        return
+        if not dishes or dish_idx >= len(dishes):
+            await call.message.answer("❌ Меню устарело. Сгенерируйте новое меню через кнопку «Новая подборка 🥗».")
+            return
 
-    dish = dishes[dish_idx]
-    buttons = [[InlineKeyboardButton(text=f"• {ing['name']}", callback_data=f"do_replace_{dish_idx}_{ing_idx}")] for
-               ing_idx, ing in enumerate(dish.get("ingredients", []))]
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_replace")])
-    await call.message.reply(f"Какой продукт заменяем в блюде **«{dish['title']}»**?", parse_mode="Markdown",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        dish = dishes[dish_idx]
+        ingredients = dish.get("ingredients", [])
+        
+        if not ingredients:
+            await call.answer("В этом блюде нет списка ингредиентов.", show_alert=True)
+            return
+
+        buttons = [
+            [InlineKeyboardButton(text=f"• {ing['name']}", callback_data=f"do_replace_{dish_idx}_{ing_idx}")] 
+            for ing_idx, ing in enumerate(ingredients)
+        ]
+        buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_replace")])
+        
+        await call.message.reply(
+            f"Какой продукт заменяем в блюде **«{dish['title']}»**?", 
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+    except Exception as e:
+        logging.error(f"Ошибка в select_ingredient_to_replace: {e}")
+        await call.answer("❌ Произошла ошибка. Попробуйте обновить меню.", show_alert=True)
 
 
 @dp.callback_query(F.data == "cancel_replace")
 async def cancel_replace(call: types.CallbackQuery):
     await call.answer()
-    await call.message.delete()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
 
 
 @dp.callback_query(F.data.startswith("do_replace_"))
@@ -592,19 +608,30 @@ async def execute_ingredient_replacement(call: types.CallbackQuery, state: FSMCo
     if not check_access(call.from_user.id):
         return
     await call.answer("Заменяю ингредиент...")
-    parts = call.data.split("_")
-    dish_idx, ing_idx = int(parts[2]), int(parts[3])
-    data = await state.get_data()
-    dishes = data.get("current_dishes", [])
+    
+    try:
+        parts = call.data.split("_")
+        dish_idx, ing_idx = int(parts[2]), int(parts[3])
+        data = await state.get_data()
+        dishes = data.get("current_dishes", [])
 
-    dish = dishes[dish_idx]
-    target_ing = dish["ingredients"][ing_idx]["name"]
-    updated_dish = await replace_ingredient_in_dish(dish, target_ing)
-    dishes[dish_idx] = updated_dish
+        if not dishes or dish_idx >= len(dishes):
+            await call.message.answer("❌ Меню устарело. Сгенерируйте новое меню.")
+            return
 
-    await state.update_data(current_dishes=dishes)
-    res_text = f"✅ **Рецепт обновлен!**\n\n" + format_dish_text(updated_dish, dish_idx, data.get("persons", 1))
-    await call.message.edit_text(res_text, parse_mode="Markdown")
+        dish = dishes[dish_idx]
+        target_ing = dish["ingredients"][ing_idx]["name"]
+        
+        updated_dish = await replace_ingredient_in_dish(dish, target_ing)
+        dishes[dish_idx] = updated_dish
+
+        await state.update_data(current_dishes=dishes)
+        res_text = f"✅ **Рецепт обновлен!**\n\n" + format_dish_text(updated_dish, dish_idx, data.get("persons", 1))
+        await call.message.edit_text(res_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        logging.error(f"Ошибка при замене ингредиента: {e}")
+        await call.message.answer("❌ Не удалось заменить ингредиент. Попробуйте еще раз.")
 
 
 @dp.callback_query(F.data.startswith("replace_dish_options_"))
@@ -612,22 +639,41 @@ async def offer_dish_replacements(call: types.CallbackQuery, state: FSMContext):
     if not check_access(call.from_user.id):
         await call.answer("Требуется подписка!", show_alert=True)
         return
-    await call.answer()
-    dish_idx = int(call.data.split("_")[-1])
-    data = await state.get_data()
-    old_dish = data.get("current_dishes", [])[dish_idx]
+    await call.answer("Ищу альтернативные блюда...")
+    
+    try:
+        dish_idx = int(call.data.split("_")[-1])
+        data = await state.get_data()
+        dishes = data.get("current_dishes", [])
 
-    options = await generate_dish_replacement_options(data.get("persons", 1), data.get("vegetarian", False),
-                                                      old_dish['title'])
-    if not options:
-        await call.message.answer("❌ Не удалось сгенерировать варианты.")
-        return
+        if not dishes or dish_idx >= len(dishes):
+            await call.message.answer("❌ Меню устарело. Сгенерируйте новое меню.")
+            return
 
-    await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
-    buttons = [[InlineKeyboardButton(text=f"🍽 {opt['title']}", callback_data=f"apply_dish_swap_{opt_idx}")] for
-               opt_idx, opt in enumerate(options)]
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_replace")])
-    await call.message.reply("Выберите новое блюдо:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        old_dish = dishes[dish_idx]
+        options = await generate_dish_replacement_options(
+            data.get("persons", 1), 
+            data.get("vegetarian", False),
+            old_dish['title']
+        )
+        
+        if not options:
+            await call.message.answer("❌ Не удалось сгенерировать варианты замены.")
+            return
+
+        await state.update_data(temp_replacement_options=options, target_dish_idx=dish_idx)
+        
+        buttons = [
+            [InlineKeyboardButton(text=f"🍽 {opt['title']}", callback_data=f"apply_dish_swap_{opt_idx}")] 
+            for opt_idx, opt in enumerate(options)
+        ]
+        buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_replace")])
+        
+        await call.message.reply("Выберите новое блюдо:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        
+    except Exception as e:
+        logging.error(f"Ошибка в offer_dish_replacements: {e}")
+        await call.answer("❌ Ошибка при поиске замен.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("apply_dish_swap_"))
@@ -635,16 +681,27 @@ async def apply_dish_swap(call: types.CallbackQuery, state: FSMContext):
     if not check_access(call.from_user.id):
         return
     await call.answer("Применяю замену...")
-    opt_idx = int(call.data.split("_")[-1])
-    data = await state.get_data()
-    dish_idx, dishes, options = data.get("target_dish_idx"), data.get("current_dishes", []), data.get(
-        "temp_replacement_options", [])
+    
+    try:
+        opt_idx = int(call.data.split("_")[-1])
+        data = await state.get_data()
+        dish_idx = data.get("target_dish_idx")
+        dishes = data.get("current_dishes", [])
+        options = data.get("temp_replacement_options", [])
 
-    dishes[dish_idx] = options[opt_idx]
-    await state.update_data(current_dishes=dishes)
+        if dish_idx is None or not dishes or not options or opt_idx >= len(options):
+            await call.message.answer("❌ Данные сессии устарели. Сгенерируйте меню заново.")
+            return
 
-    caption = f"✅ **Блюдо заменено!**\n\n" + format_dish_text(dishes[dish_idx], dish_idx, data.get("persons", 1))
-    await call.message.edit_text(caption, parse_mode="Markdown")
+        dishes[dish_idx] = options[opt_idx]
+        await state.update_data(current_dishes=dishes)
+
+        caption = f"✅ **Блюдо заменено!**\n\n" + format_dish_text(dishes[dish_idx], dish_idx, data.get("persons", 1))
+        await call.message.edit_text(caption, parse_mode="Markdown")
+        
+    except Exception as e:
+        logging.error(f"Ошибка при применении замены блюда: {e}")
+        await call.message.answer("❌ Не удалось применить замену.")
 
 
 @dp.callback_query(F.data == "get_shopping_list")
